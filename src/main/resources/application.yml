@@ -1,0 +1,14 @@
+registration:
+  center:
+    type: nacos # 或 zookeeper
+    server-addr: localhost:8848
+nacos:
+  ip: ""
+  port: ""
+  dataId: ""
+  group: ""
+gateway:
+  port: 8080
+  # config.yaml
+load:
+  load-strategy: "round_robin"

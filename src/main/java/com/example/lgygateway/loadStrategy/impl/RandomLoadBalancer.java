@@ -6,18 +6,18 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
-@Component("roundRobinLoadBalancer")
+import java.util.Random;
+@Component("randomLoadBalancer")
 @Lazy
-public class RoundRobinLoadBalancer implements LoadBalancerStrategy {
-    private final AtomicInteger index = new AtomicInteger(0);
+public class RandomLoadBalancer implements LoadBalancerStrategy {
+    private final Random random = new Random();
 
     @Override
     public Instance selectInstance(List<Instance> instances) {
         if (instances == null || instances.isEmpty()) {
             return null;
         }
-        int currentIndex = index.getAndUpdate(i -> (i + 1) % instances.size());
-        return instances.get(currentIndex);
+        int index = random.nextInt(instances.size());
+        return instances.get(index);
     }
 }

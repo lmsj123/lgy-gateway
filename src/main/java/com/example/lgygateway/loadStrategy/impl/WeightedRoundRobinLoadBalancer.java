@@ -2,12 +2,15 @@ package com.example.lgygateway.loadStrategy.impl;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-
+@Component("weightedRoundRobinLoadBalancer")
+@Lazy
 public class WeightedRoundRobinLoadBalancer implements LoadBalancerStrategy {
-    private AtomicInteger index = new AtomicInteger(0);
+    private final AtomicInteger index = new AtomicInteger(0);
     private int totalWeight = 0;
     private int gcdWeight = 0;
     private int maxWeight = 0;

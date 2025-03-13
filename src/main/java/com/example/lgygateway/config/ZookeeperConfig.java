@@ -5,10 +5,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 
-@Configuration
 @Data
-@ConfigurationProperties(prefix = "load")
 @Lazy
-public class LoadConfig {
-    private String loadStrategy;
+@Configuration
+@ConfigurationProperties(prefix = "zookeeper")
+public class ZookeeperConfig {
+    private String ip;
+    private String port;
 }

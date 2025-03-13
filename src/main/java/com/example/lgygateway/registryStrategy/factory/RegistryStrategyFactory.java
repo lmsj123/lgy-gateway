@@ -1,29 +1,33 @@
 package com.example.lgygateway.registryStrategy.factory;
 
-import com.example.lgygateway.config.GatewayConfig;
 import com.example.lgygateway.config.RegistryConfig;
-import com.example.lgygateway.registryStrategy.RegistryStrategy;
+import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.registryStrategy.impl.NacosRegistryStrategy;
-//import com.example.lgygateway.registryStrategy.impl.ZookeeperRegistryStrategy;
+import com.example.lgygateway.registryStrategy.impl.ZookeeperRegistryStrategy;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 
 @Component
 public class RegistryStrategyFactory {
     @Autowired
-    private NacosRegistryStrategy nacosRegistryStrategy;
-//    @Autowired
-//    private ZookeeperRegistryStrategy zookeeperRegistryStrategy;
+    private ApplicationContext applicationContext;
     @Autowired
     private RegistryConfig registryConfig;
 
-    public RegistryStrategy getRegistryStrategy() {
+    private Registry registryStrategy;
+
+    public Registry getRegistryStrategy() {
+        if (registryStrategy != null) {
+            return registryStrategy;
+        }
         if ("nacos".equalsIgnoreCase(registryConfig.getType())) {
-            return nacosRegistryStrategy;
-//        } else if ("zookeeper".equalsIgnoreCase(registryConfig.getType())) {
-//            return zookeeperRegistryStrategy;
-//        } else {
-        }else {
+            registryStrategy = applicationContext.getBean(NacosRegistryStrategy.class);
+            return registryStrategy;
+        }else if ("zookeeper".equalsIgnoreCase(registryConfig.getType())) {
+            registryStrategy = applicationContext.getBean(ZookeeperRegistryStrategy.class);
+            return registryStrategy;
+        } else {
             throw new IllegalArgumentException("Unsupported registry type: " + registryConfig.getType());
         }
     }

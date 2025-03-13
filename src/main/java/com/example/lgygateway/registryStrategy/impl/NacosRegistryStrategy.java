@@ -1,14 +1,13 @@
 package com.example.lgygateway.registryStrategy.impl;
 
-import ch.qos.logback.classic.spi.EventArgUtil;
 import com.alibaba.nacos.api.NacosFactory;
 import com.alibaba.nacos.api.config.ConfigService;
+import com.alibaba.nacos.api.config.listener.Listener;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.NamingService;
 import com.alibaba.nacos.api.naming.pojo.Instance;
-import com.example.lgygateway.config.GatewayConfig;
 import com.example.lgygateway.config.NacosConfig;
-import com.example.lgygateway.registryStrategy.RegistryStrategy;
+import com.example.lgygateway.registryStrategy.Registry;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
@@ -17,31 +16,58 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 @Component
 @Lazy
-public class NacosRegistryStrategy implements RegistryStrategy {
+public class NacosRegistryStrategy implements Registry {
     @Autowired
     private NacosConfig nacosConfig;
-    Map<String, List<Instance>> routeRules = new HashMap<>();
-    private NamingService namingService;
+
     @Override
-    public Map<String,List<Instance>> getRouteRules() {
+    public ConcurrentHashMap<String, List<Instance>> getRouteRules() {
         return routeRules;
     }
+
+    private final ConcurrentHashMap<String, List<Instance>> routeRules = new ConcurrentHashMap<>();
+    private NamingService namingService;
+    private ConfigService configService;
+
     @PostConstruct
     public void start() throws NacosException {
-        if(!nacosConfig.getIp().isEmpty() && !nacosConfig.getPort().isEmpty()) {
-            namingService = NacosFactory.createNamingService(nacosConfig.getIp()+ ":" + nacosConfig.getPort());
+        if (nacosConfig.getDataId().isEmpty() || nacosConfig.getGroup().isEmpty()) {
+            throw new NacosException(NacosException.NOT_FOUND, "无法找到路由配置的地址");
         }
+        if (nacosConfig.getIp().isEmpty() || nacosConfig.getPort().isEmpty()) {
+            throw new NacosException(NacosException.NOT_FOUND, "无法找到nacos的地址");
+        }
+        //功能为：通过服务名拿到对应的示例
+        namingService = NacosFactory.createNamingService(nacosConfig.getIp() + ":" + nacosConfig.getPort());
+        updateRouteRules();
+        //后续监听路由规则是否更改
+        configService = NacosFactory.createConfigService(nacosConfig.getIp() + ":" + nacosConfig.getPort());
+        configService.addListener(nacosConfig.getDataId(), nacosConfig.getGroup(), new Listener() {
+            @Override
+            public void receiveConfigInfo(String configInfo) {
+                updateRouteRules();
+            }
+
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+        });
     }
-    @Override
+
     public void updateRouteRules() {
         try {
-            ConfigService configService = NacosFactory.createConfigService(nacosConfig.getIp()+ ":" + nacosConfig.getPort());
             String dataId = nacosConfig.getDataId();
             String group = nacosConfig.getGroup();
+            if (dataId.isEmpty() || group.isEmpty()) {
+                throw new NacosException(NacosException.NOT_FOUND, "无法找到路由配置的地址");
+            }
             String content = configService.getConfig(dataId, group, 5000);
             //更新相关路由
             parseAndUpdateRouteRules(content);
@@ -55,11 +81,11 @@ public class NacosRegistryStrategy implements RegistryStrategy {
         ObjectMapper objectMapper = new ObjectMapper();
         try {
             // 示例： “/xxxx" : "http://xxxxServer"
-            Map<String,String> newRouteRules = objectMapper.readValue(content, new TypeReference<>() {
+            Map<String, String> newRouteRules = objectMapper.readValue(content, new TypeReference<>() {
             });
 
             Map<String, List<Instance>> rules = newRouteRules.entrySet().stream().collect(Collectors.toMap(
-                    entry -> entry.getKey(),
+                    Map.Entry::getKey,
                     entry -> {
                         try {
                             return namingService.getAllInstances(entry.getValue());
@@ -73,5 +99,4 @@ public class NacosRegistryStrategy implements RegistryStrategy {
             e.printStackTrace();
         }
     }
-
 }

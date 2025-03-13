@@ -1,8 +1,9 @@
 package com.example.lgygateway.netty;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
+import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.loadStrategy.LoadServer;
-import com.example.lgygateway.registryStrategy.RegistryStrategy;
+import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.registryStrategy.factory.RegistryStrategyFactory;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.Unpooled;
@@ -26,30 +27,33 @@ import java.util.Map;
 
 @Component
 public class NettyHttpServer {
-    private final RegistryStrategyFactory registryStrategyFactory;
-    private final RegistryStrategy registryStrategy;
+    @Autowired
+    private NettyConfig nettyConfig;
+
+    private final Registry registryStrategy;
     private final CloseableHttpClient httpClient;
     private Map<String, List<Instance>> routeRules;
     @Autowired
     private LoadServer loadServer;
+
     @Autowired
     public NettyHttpServer(RegistryStrategyFactory registryStrategyFactory) {
-        this.registryStrategyFactory = registryStrategyFactory;
         this.registryStrategy = registryStrategyFactory.getRegistryStrategy();
         this.httpClient = HttpClients.createDefault();
     }
-
+    private EventLoopGroup bossGroup;
+    private EventLoopGroup workerGroup;
     @PostConstruct
     public void start() throws InterruptedException {
-        EventLoopGroup bossGroup = new NioEventLoopGroup();
-        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        bossGroup = new NioEventLoopGroup();
+        workerGroup = new NioEventLoopGroup();
         try {
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
-                        protected void initChannel(SocketChannel ch) throws Exception {
+                        protected void initChannel(SocketChannel ch){
                             ch.pipeline().addLast(new HttpRequestDecoder());
                             ch.pipeline().addLast(new HttpResponseEncoder());
                             ch.pipeline().addLast(new SimpleChannelInboundHandler<FullHttpRequest>() {
@@ -77,7 +81,7 @@ public class NettyHttpServer {
                     .option(ChannelOption.SO_BACKLOG, 128)
                     .childOption(ChannelOption.SO_KEEPALIVE, true);
 
-            ChannelFuture f = b.bind(8080).sync();
+            ChannelFuture f = b.bind(nettyConfig.getPort()).sync();
             f.channel().closeFuture().sync();
         } finally {
             workerGroup.shutdownGracefully();
@@ -91,6 +95,20 @@ public class NettyHttpServer {
             byte[] body = EntityUtils.toByteArray(response.getEntity());
             DefaultFullHttpResponse fullHttpResponse = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.valueOf(response.getStatusLine().getStatusCode()), Unpooled.wrappedBuffer(body));
             ctx.writeAndFlush(fullHttpResponse).addListener(ChannelFutureListener.CLOSE);
+        }
+    }
+    public void restart(int newPort) throws InterruptedException {
+        shutdown();
+        nettyConfig.setPort(newPort);
+        start();
+    }
+    private void shutdown() {
+        // 关闭 Netty 服务
+        if (bossGroup != null) {
+            bossGroup.shutdownGracefully();
+        }
+        if (workerGroup != null) {
+            workerGroup.shutdownGracefully();
         }
     }
 }

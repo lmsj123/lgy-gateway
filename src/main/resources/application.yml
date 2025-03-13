@@ -1,14 +1,25 @@
+#此为选择注册配置中心
 registration:
   center:
     type: nacos # 或 zookeeper
     server-addr: localhost:8848
+
+#此为nacos路由配置的相关属性
 nacos:
   ip: ""
   port: ""
   dataId: ""
   group: ""
-gateway:
-  port: 8080
-  # config.yaml
+
+#此为nacos路由配置的相关属性
+zookeeper:
+  ip: ""
+  port: ""
+
+#配置负载均衡规则
 load:
   load-strategy: "round_robin"
+
+#配置netty所监听的端口
+netty:
+  port: 9090

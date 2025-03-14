@@ -1,7 +1,6 @@
 package com.example.lgygateway.filters.init;
 
 import com.example.lgygateway.filters.Filter;
-import com.example.lgygateway.filters.impl.AuthFilter;
 import com.example.lgygateway.filters.models.FilterChain;
 import jakarta.annotation.PostConstruct;
 import lombok.Data;

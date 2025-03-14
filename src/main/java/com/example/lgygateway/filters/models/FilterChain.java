@@ -1,7 +1,6 @@
 package com.example.lgygateway.filters.models;
 
 import com.example.lgygateway.filters.Filter;
-import io.netty.handler.codec.http.FullHttpRequest;
 
 import java.util.ArrayList;
 import java.util.List;

@@ -2,7 +2,6 @@ package com.example.lgygateway.loadStrategy;
 
 import com.example.lgygateway.config.LoadConfig;
 import jakarta.annotation.PostConstruct;
-import lombok.Data;
 import lombok.Getter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;

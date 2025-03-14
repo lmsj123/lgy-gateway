@@ -7,6 +7,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
+
 //后续通过nacos配置相关动态更新端口的操作
 @RestController
 public class NettyController {
@@ -15,7 +17,7 @@ public class NettyController {
     private NettyHttpServer nettyHttpServer;
 
     @PostMapping("/change-port")
-    public String changePort(@RequestParam int newPort) throws InterruptedException {
+    public String changePort(@RequestParam int newPort) throws InterruptedException, IOException {
         nettyHttpServer.restartNetty(newPort);  // 重启 Netty 服务
         return "Netty port changed to: " + newPort;
     }

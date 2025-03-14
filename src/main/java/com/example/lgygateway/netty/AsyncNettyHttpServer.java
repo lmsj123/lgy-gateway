@@ -1,13 +1,38 @@
 package com.example.lgygateway.netty;
-
-import com.alibaba.nacos.api.naming.pojo.Instance;
+/*
+关键方法详细解读
+1. initializeClientBootstrap()
+功能：配置客户端连接参数，初始化ChannelPipeline。
+异步点：
+HttpClientCodec和HttpObjectAggregator实现HTTP请求的编码与聚合。
+BackendHandler异步处理后端响应，通过ChannelHandlerContext回写结果。
+2. GatewayHandler.channelRead0()
+流程：
+接收客户端请求，通过路由表匹配目标服务地址。
+调用forwardRequestWithRetry()发起异步转发。
+异步点：
+路由匹配和转发操作均在EventLoop线程中执行，不阻塞其他请求
+3. forwardRequestWithRetry()
+流程：
+解析目标URI，建立异步连接（clientBootstrap.connect()）。
+通过ChannelFuture监听连接结果，成功时异步写入请求，失败时触发重试。
+异步点：
+连接和写入操作均通过addListener注册回调，避免阻塞当前线程
+4. BackendHandler.channelRead0()
+流程：
+接收后端响应，复制响应头和内容。
+通过frontendCtx.writeAndFlush()异步回写给客户端。
+异步点：
+响应回写通过ChannelFutureListener.CLOSE在完成时关闭连接，全程非阻塞
+5. handleRetry()
+功能：在EventLoop线程中调度延迟重试任务。
+异步点：
+使用eventLoop.schedule()实现非阻塞定时任务，避免阻塞I/O线程
+ */
 import com.example.lgygateway.config.NettyConfig;
-import com.example.lgygateway.filters.init.FiltersInit;
-import com.example.lgygateway.filters.models.FilterChain;
-import com.example.lgygateway.filters.models.FullContext;
-import com.example.lgygateway.loadStrategy.LoadServer;
 import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
+import com.example.lgygateway.route.RouteTable;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.Unpooled;
@@ -21,12 +46,8 @@ import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
@@ -35,17 +56,13 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 public class AsyncNettyHttpServer {
     @Autowired
     private NettyConfig nettyConfig;
-    @Autowired
-    private LoadServer loadServer;
-    @Autowired
-    private FiltersInit filtersInit;
-    private final Registry registry;
-    private ConcurrentHashMap<String, List<Instance>> routeRules;
+    // 客户端连接池，复用长连接与线程资源，避免每次转发都新建连接。
     private final Bootstrap clientBootstrap;
     private final NioEventLoopGroup clientGroup;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
-
+    @Autowired
+    private RouteTable routeTable;
     @Autowired
     public AsyncNettyHttpServer(RegistryFactory registryFactory) {
         try {
@@ -54,15 +71,15 @@ public class AsyncNettyHttpServer {
             if (registry == null) {
                 throw new IllegalStateException("Registry initialization failed");
             }
-            this.registry = registry;
+            //内部是使用了io多路复用
             this.clientGroup = new NioEventLoopGroup();
+            //建立长连接，复用线程和连接资源，避免传统同步HTTP客户端的线程阻塞问题
             this.clientBootstrap = new Bootstrap();
             initializeClientBootstrap();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to initialize NettyHttpServer", e);
         }
     }
-
     private void initializeClientBootstrap() {
         clientBootstrap.group(clientGroup)
                 .channel(NioSocketChannel.class)
@@ -77,7 +94,6 @@ public class AsyncNettyHttpServer {
                     }
                 });
     }
-
     @PostConstruct
     public void start() throws InterruptedException {
         bossGroup = new NioEventLoopGroup();
@@ -105,54 +121,21 @@ public class AsyncNettyHttpServer {
             shutdown();
         }
     }
-
     private class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
-            String path = request.uri();
-            routeRules = registry.getRouteRules();
-
-            for (Map.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
-                if (path.contains(entry.getKey()) && successFiltering(request)) {
-                    List<Instance> instances = entry.getValue();
-                    Instance selectedInstance = loadServer.getLoadBalancerStrategy().selectInstance(instances);
-                    String backendPath = path.replace(entry.getKey(), "");
-                    String targetUrl = "http://" + selectedInstance.getIp() + ":" + selectedInstance.getPort() + backendPath;
-
-                    // 创建转发的请求
-                    FullHttpRequest proxyRequest = createProxyRequest(request, targetUrl);
-                    forwardRequestWithRetry(ctx, proxyRequest, 3);
-                    return;
-                }
+            FullHttpRequest httpRequest = routeTable.matchRouteAsync(request.uri(), request);
+            if (httpRequest != null) {
+                forwardRequestWithRetry(ctx, httpRequest, 3);
+                return;
             }
-
             sendErrorResponse(ctx, HttpResponseStatus.NOT_FOUND);
         }
-
-        private FullHttpRequest createProxyRequest(FullHttpRequest original, String targetUrl) throws URISyntaxException {
-            URI uri = new URI(targetUrl);
-            // 创建新的请求对象
-            FullHttpRequest newRequest = new DefaultFullHttpRequest(
-                    HTTP_1_1,
-                    original.method(),
-                    uri.getRawPath(),
-                    original.content().copy(),
-                    original.headers().copy(),
-                    original.trailingHeaders().copy()
-            );
-            // 设置必要的头信息
-            newRequest.headers()
-                    .set(HttpHeaderNames.HOST, uri.getHost())
-                    .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
-            return newRequest;
-        }
-
         private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status) {
             FullHttpResponse response = new DefaultFullHttpResponse(HTTP_1_1, status);
             ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
         }
     }
-
     private void forwardRequestWithRetry(ChannelHandlerContext ctx, FullHttpRequest request, int retries) {
         try {
             URI uri = new URI(request.uri());
@@ -173,7 +156,6 @@ public class AsyncNettyHttpServer {
             sendErrorResponse(ctx, HttpResponseStatus.BAD_REQUEST);
         }
     }
-
     private void handleRetry(ChannelHandlerContext ctx, FullHttpRequest request, int retries, Throwable cause) {
         if (retries > 0) {
             ctx.channel().eventLoop().schedule(() ->
@@ -184,7 +166,6 @@ public class AsyncNettyHttpServer {
             sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
         }
     }
-
     private class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
         private ChannelHandlerContext frontendCtx;
 
@@ -224,23 +205,6 @@ public class AsyncNettyHttpServer {
             ctx.close();
         }
     }
-
-    //重启netty操作
-    public void restartNetty(int newPort) throws InterruptedException, IOException {
-        shutdown();
-        nettyConfig.setPort(newPort);
-        start();
-    }
-
-    // 修改successFiltering方法（保持原有逻辑）
-    private boolean successFiltering(FullHttpRequest request) {
-        FilterChain filterChain = filtersInit.getFilterChain();
-        FullContext fullContext = new FullContext();
-        fullContext.setRequest(request);
-        filterChain.doFilter(fullContext);
-        return fullContext.getResponse() == null;
-    }
-
     // 修改后的shutdown方法
     private void shutdown() {
         if (bossGroup != null) {

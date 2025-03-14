@@ -6,20 +6,22 @@ import com.example.lgygateway.filters.models.FilterChain;
 import com.example.lgygateway.filters.models.FullContext;
 import com.example.lgygateway.loadStrategy.LoadServer;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
-import io.netty.handler.codec.http.FullHttpRequest;
-import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.*;
 import jakarta.annotation.PostConstruct;
 import org.apache.http.client.methods.*;
 import org.apache.http.entity.ByteArrayEntity;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.netty.handler.codec.http.HttpMethod.*;
 import static io.netty.handler.codec.http.HttpMethod.DELETE;
+import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
 @Component
 public class RouteTable {
@@ -50,6 +52,26 @@ public class RouteTable {
                 String targetUrl = "http://" + selectedInstance.getIp() + ":" + selectedInstance.getPort() + backendPath;
                 //获取到对应的request准备发送
                 return createHttpRequest(request, targetUrl);
+            }
+        }
+        return null;
+    }
+    public FullHttpRequest matchRouteAsync(String url,FullHttpRequest request) throws URISyntaxException {
+        //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
+        //也会对后续匹配进行优化
+        for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
+            //当查询到请求中符合网关转发规则
+            if (url.contains(entry.getKey()) && successFiltering(request)) {
+                //获取到服务实例
+                List<Instance> instances = entry.getValue();
+                //根据定义的负载均衡策略选择一个服务作为转发ip
+                Instance selectedInstance = loadServer.getLoadBalancerStrategy().selectInstance(instances);
+                //示例： http://localhost/xxxx/api -> http://instance/api
+                //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
+                String backendPath = url.replace(entry.getKey(), "");
+                String targetUrl = "http://" + selectedInstance.getIp() + ":" + selectedInstance.getPort() + backendPath;
+                //获取到对应的request准备发送
+                return createProxyRequest(request, targetUrl);
             }
         }
         return null;
@@ -92,6 +114,23 @@ public class RouteTable {
             httpRequest.setHeader(header.getKey(), header.getValue());
         }
         return httpRequest;
+    }
+    private FullHttpRequest createProxyRequest(FullHttpRequest original, String targetUrl) throws URISyntaxException {
+        URI uri = new URI(targetUrl);
+        // 创建新的请求对象
+        FullHttpRequest newRequest = new DefaultFullHttpRequest(
+                HTTP_1_1,
+                original.method(),
+                uri.getRawPath(),
+                original.content().copy(),
+                original.headers().copy(),
+                original.trailingHeaders().copy()
+        );
+        // 设置必要的头信息
+        newRequest.headers()
+                .set(HttpHeaderNames.HOST, uri.getHost())
+                .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
+        return newRequest;
     }
 
 }

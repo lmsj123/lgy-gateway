@@ -1,13 +1,26 @@
 package com.example.lgygateway.netty;
-
-import com.alibaba.nacos.api.naming.pojo.Instance;
+/*
+1. 服务启动阶段（start()方法）
+初始化Netty线程组：使用NioEventLoopGroup创建Boss（负责连接）和Worker（负责I/O）线程组
+配置ServerBootstrap：
+指定通道类型为NioServerSocketChannel（NIO模型）
+添加HTTP编解码器和聚合器（HttpObjectAggregator），支持完整HTTP请求处理
+自定义SimpleChannelInboundHandler处理业务逻辑。
+2. 请求处理阶段（channelRead0方法）
+路由匹配：通过RouteTable.matchRoute()根据URI匹配目标地址（例如/api/映射到具体服务实例）
+请求转发：
+根据原始请求方法（GET/POST/PUT/DELETE）创建新的HttpUriRequest对象，并复制请求头和Body
+调用forwardRequestWithRetry进行转发，支持最多3次重试。
+3. HTTP客户端转发（forwardRequest方法）
+同步HTTP调用：使用CloseableHttpClient发送请求，接收响应后封装为Netty的FullHttpResponse返回客户端
+连接池优化：通过PoolingHttpClientConnectionManager复用HTTP连接，设置最大连接数为200
+4. 重试机制（forwardRequestWithRetry方法）
+异步调度重试：若转发失败（如服务器返回5xx错误），通过eventLoop.schedule()在Netty事件循环线程中延迟1秒重试，避免阻塞I/O线程
+ */
 import com.example.lgygateway.config.NettyConfig;
-import com.example.lgygateway.filters.init.FiltersInit;
-import com.example.lgygateway.filters.models.FilterChain;
-import com.example.lgygateway.filters.models.FullContext;
-import com.example.lgygateway.loadStrategy.LoadServer;
 import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
+import com.example.lgygateway.route.RouteTable;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
@@ -19,44 +32,40 @@ import jakarta.annotation.PostConstruct;
 import org.apache.http.Header;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.*;
-import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.util.EntityUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-
-import static io.netty.handler.codec.http.HttpMethod.*;
 
 @Component
 public class NettyHttpServer {
     @Autowired
     private NettyConfig nettyConfig;
+
     @Autowired
-    private LoadServer loadServer;
-    @Autowired
-    private FiltersInit filtersInit;
-    private final Registry registry;
+    private RouteTable routeTable;
     private final CloseableHttpClient httpClient;
-    private ConcurrentHashMap<String, List<Instance>> routeRules;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
 
     @Autowired
-    public NettyHttpServer(RegistryFactory registryStrategyFactory) {
+    public NettyHttpServer(RegistryFactory registryFactory) {
         try {
-            Registry registry = registryStrategyFactory.getRegistry();
+            // 使用连接池提高线程复用率
+            PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager();
+            cm.setMaxTotal(200); // 最大连接数
+            this.httpClient = HttpClients.custom().setConnectionManager(cm).build();
+            //获取注册中心
+            Registry registry = registryFactory.getRegistry();
             if (registry == null) {
                 throw new IllegalStateException("Registry initialization failed");
             }
-            this.registry = registry;
-            this.httpClient = HttpClients.createDefault();
+
         } catch (Exception e) {
             //抛出异常阻止bean初始化 否则容易出现bug
             throw new IllegalStateException("Failed to initialize NettyHttpServer", e);
@@ -80,24 +89,21 @@ public class NettyHttpServer {
                             ch.pipeline().addLast(new HttpResponseEncoder());
                             ch.pipeline().addLast(new SimpleChannelInboundHandler<FullHttpRequest>() {
                                 @Override
-                                protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
+                                protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request){
+                                    //获取监听地址
                                     String path = request.uri();
-                                    routeRules = registry.getRouteRules(); // Get updated route rules
-                                    for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
-                                        //当查询到请求中符合网关转发规则
-                                        if (path.contains(entry.getKey()) && successFiltering(request)) {
-                                            List<Instance> instances = entry.getValue();
-                                            Instance selectedInstance = loadServer.getLoadBalancerStrategy().selectInstance(instances);
-                                            String backendPath = path.replace(entry.getKey(), "");
-                                            String targetUrl = "http://" + selectedInstance.getIp() + ":" + selectedInstance.getPort() + backendPath;
-                                            HttpUriRequest httpRequest = createHttpRequest(request, targetUrl);
-                                            forwardRequestWithRetry(ctx, httpRequest, 3);
-                                            return;
-                                        }
+                                    //拿到转发地址
+                                    HttpUriRequest httpRequest = routeTable.matchRoute(path, request);
+                                    if (httpRequest != null) {
+                                        //获取到对应的request准备发送
+                                        forwardRequestWithRetry(ctx, httpRequest, 3);
+                                        request.release();  // 新增释放操作
+                                        return;
                                     }
-                                    // If no matching rule, return a 404 response or handle accordingly
+                                    // 如果并没有匹配到
                                     FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_FOUND);
                                     ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
+                                    request.release();
                                 }
                             });
                         }
@@ -111,43 +117,8 @@ public class NettyHttpServer {
             httpClient.close();
             workerGroup.shutdownGracefully();
             bossGroup.shutdownGracefully();
-        }
-    }
 
-    // 根据原始请求创建新的HTTP请求对象
-    private HttpUriRequest createHttpRequest(FullHttpRequest originalRequest, String targetUrl) throws IOException {
-        HttpUriRequest httpRequest;
-        HttpMethod method = originalRequest.method();
-        if (method.equals(GET)) {
-            httpRequest = new HttpGet(targetUrl);
-        } else if (method.equals(POST)) {
-            HttpPost postRequest = new HttpPost(targetUrl);
-            postRequest.setEntity(new ByteArrayEntity(originalRequest.content().array()));
-            httpRequest = postRequest;
-        } else if (method.equals(PUT)) {
-            HttpPut putRequest = new HttpPut(targetUrl);
-            putRequest.setEntity(new ByteArrayEntity(originalRequest.content().array()));
-            httpRequest = putRequest;
-        } else if (method.equals(DELETE)) {
-            httpRequest = new HttpDelete(targetUrl);
-        } else {
-            throw new IllegalArgumentException("Unsupported HTTP method: " + originalRequest.method());
         }
-        // 复制原始请求的头信息和请求体到新请求中
-        for (Map.Entry<String, String> header : originalRequest.headers().entries()) {
-            httpRequest.setHeader(header.getKey(), header.getValue());
-        }
-        return httpRequest;
-    }
-
-    //可添加相关的过滤条件
-    private boolean successFiltering(FullHttpRequest request) {
-        //这里需要做一个判断 若过滤器修改了请求（如修改Header）则需要更新
-        FilterChain filterChain = filtersInit.getFilterChain();
-        FullContext fullContext = new FullContext();
-        fullContext.setRequest(request);
-        filterChain.doFilter(fullContext);
-        return fullContext.getResponse() == null;
     }
 
     //向相关服务发送请求无重试
@@ -175,7 +146,8 @@ public class NettyHttpServer {
     }
 
     //向相关服务发送请求有规定重试次数
-    private void forwardRequestWithRetry(ChannelHandlerContext ctx, HttpUriRequest httpRequest, int maxRetries) throws Exception {
+    private void forwardRequestWithRetry(ChannelHandlerContext ctx, HttpUriRequest httpRequest, int maxRetries){
+        //计算重试次数
         int attempt = 0;
         while (attempt < maxRetries) {
             try {

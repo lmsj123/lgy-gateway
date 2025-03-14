@@ -20,9 +20,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
-@Component
+@Component("nacos")
 @Lazy
-public class NacosRegistryStrategy implements Registry {
+public class NacosRegistry implements Registry {
     @Autowired
     private NacosConfig nacosConfig;
 
@@ -30,9 +30,11 @@ public class NacosRegistryStrategy implements Registry {
     public ConcurrentHashMap<String, List<Instance>> getRouteRules() {
         return routeRules;
     }
-
+    //存储路由规则
     private final ConcurrentHashMap<String, List<Instance>> routeRules = new ConcurrentHashMap<>();
+    //用来通过服务名获取集群
     private NamingService namingService;
+    //用于监听路由规则的更新
     private ConfigService configService;
 
     @PostConstruct

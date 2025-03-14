@@ -50,7 +50,7 @@
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-all</artifactId>
-            <version>4.1.68.Final</version>
+            <version>4.1.109.Final</version>
         </dependency>
 
         <!-- Nacos -->
@@ -83,6 +83,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <!--nacos配置中心-->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+            <version>2023.0.1.2</version>
         </dependency>
     </dependencies>
 

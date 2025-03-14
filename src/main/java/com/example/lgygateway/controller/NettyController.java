@@ -16,7 +16,7 @@ public class NettyController {
 
     @PostMapping("/change-port")
     public String changePort(@RequestParam int newPort) throws InterruptedException {
-        nettyHttpServer.restart(newPort);  // 重启 Netty 服务
+        nettyHttpServer.restartNetty(newPort);  // 重启 Netty 服务
         return "Netty port changed to: " + newPort;
     }
 }

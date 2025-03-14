@@ -10,8 +10,8 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
-@Component
-public class ZookeeperRegistryStrategy implements Registry {
+@Component("zookeeper")
+public class ZookeeperRegistry implements Registry {
     @Autowired
     private ZookeeperConfig zookeeperConfig;
 

@@ -14,7 +14,6 @@ import java.net.URLClassLoader;
 @Data
 public class FiltersInit {
     private FilterChain filterChain = new FilterChain();
-
     @PostConstruct
     public void init() {
         // 动态加载指定路径下的过滤器类
@@ -36,7 +35,7 @@ public class FiltersInit {
             URLClassLoader classLoader = new URLClassLoader(urls);
 
             for (File file : files) {
-                String className = file.getName().replace(".class", "");
+                String className = file.getName().replace(".java", "");
                 Class clazz = classLoader.loadClass(className);
                 if (Filter.class.isAssignableFrom(clazz)) {
                     Filter filter = (Filter) clazz.getDeclaredConstructor().newInstance();

@@ -7,7 +7,6 @@ import com.example.lgygateway.filters.models.FullContext;
 import com.example.lgygateway.loadStrategy.LoadServer;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
 import io.netty.handler.codec.http.*;
-import jakarta.annotation.PostConstruct;
 import org.apache.http.client.methods.*;
 import org.apache.http.entity.ByteArrayEntity;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,12 +30,8 @@ public class RouteTable {
     private RegistryFactory registryFactory;
     @Autowired
     private LoadServer loadServer;
-    private ConcurrentHashMap<String, List<Instance>> routeRules;
-    @PostConstruct
-    public void init() {
-        routeRules = registryFactory.getRegistry().getRouteRules();
-    }
     public HttpUriRequest matchRoute(String url,FullHttpRequest request) {
+        ConcurrentHashMap<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
         //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
         //也会对后续匹配进行优化
         for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
@@ -57,6 +52,7 @@ public class RouteTable {
         return null;
     }
     public FullHttpRequest matchRouteAsync(String url,FullHttpRequest request) throws URISyntaxException {
+        ConcurrentHashMap<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
         //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
         //也会对后续匹配进行优化
         for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {

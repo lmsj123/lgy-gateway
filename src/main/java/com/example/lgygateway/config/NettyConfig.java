@@ -11,4 +11,5 @@ import org.springframework.context.annotation.Lazy;
 @Lazy
 public class NettyConfig {
     private int port;
+    private int times;
 }

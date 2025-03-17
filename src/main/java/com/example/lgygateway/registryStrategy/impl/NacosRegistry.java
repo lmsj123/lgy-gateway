@@ -25,7 +25,6 @@ import java.util.stream.Collectors;
 public class NacosRegistry implements Registry {
     @Autowired
     private NacosConfig nacosConfig;
-
     @Override
     public ConcurrentHashMap<String, List<Instance>> getRouteRules() {
         return routeRules;
@@ -36,7 +35,6 @@ public class NacosRegistry implements Registry {
     private NamingService namingService;
     //用于监听路由规则的更新
     private ConfigService configService;
-
     @PostConstruct
     public void start() throws NacosException {
         if (nacosConfig.getDataId().isEmpty() || nacosConfig.getGroup().isEmpty()) {
@@ -62,7 +60,6 @@ public class NacosRegistry implements Registry {
             }
         });
     }
-
     public void updateRouteRules() {
         try {
             String dataId = nacosConfig.getDataId();
@@ -74,10 +71,9 @@ public class NacosRegistry implements Registry {
             //更新相关路由
             parseAndUpdateRouteRules(content);
         } catch (NacosException e) {
-            e.printStackTrace();
+            e.fillInStackTrace();
         }
     }
-
     private void parseAndUpdateRouteRules(String content) {
         // 注册中心的相关路由规则可能为 JSON format: {"/xxxx": "xxxxServer", ...}
         ObjectMapper objectMapper = new ObjectMapper();
@@ -98,7 +94,7 @@ public class NacosRegistry implements Registry {
             routeRules.clear();
             routeRules.putAll(rules);
         } catch (Exception e) {
-            e.printStackTrace();
+            e.fillInStackTrace();
         }
     }
 }

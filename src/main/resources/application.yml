@@ -23,3 +23,4 @@ load:
 #配置netty所监听的端口
 netty:
   port: 9090
+  times: 3

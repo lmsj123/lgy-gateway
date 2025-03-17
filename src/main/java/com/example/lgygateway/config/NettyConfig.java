@@ -12,4 +12,7 @@ import org.springframework.context.annotation.Lazy;
 public class NettyConfig {
     private int port;
     private int times;
+    private int maxQps;
+    private int maxBurst;
+    private int tokenRefillRate;
 }

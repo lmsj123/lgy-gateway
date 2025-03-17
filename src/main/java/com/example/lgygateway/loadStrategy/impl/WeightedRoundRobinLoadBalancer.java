@@ -5,63 +5,49 @@ import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 @Component("weightedRoundRobinLoadBalancer")
 @Lazy
 public class WeightedRoundRobinLoadBalancer implements LoadBalancerStrategy {
-    private final AtomicInteger index = new AtomicInteger(0);
-    private int totalWeight = 0;
-    private int gcdWeight = 0;
-    private int maxWeight = 0;
-    private int serverCount = 0;
+    private final AtomicInteger currentIndex = new AtomicInteger(-1); // 当前索引
+    private final AtomicInteger currentWeight = new AtomicInteger(0); // 当前权重
 
     @Override
     public Instance selectInstance(List<Instance> instances) {
-        if (instances == null || instances.isEmpty()) {
+        if (instances.isEmpty()) {
             return null;
         }
-        if (totalWeight == 0) {
-            for (Instance instance : instances) {
-                int weight = (int) instance.getWeight();
-                totalWeight += weight;
-                maxWeight = Math.max(maxWeight, weight);
-            }
-            gcdWeight = gcd(instances);
-            serverCount = instances.size();
-        }
+        int maxWeight = (int)instances.stream().mapToDouble(Instance::getWeight).max().orElse(0);
+        int gcdWeight = calculateGCD(instances);
+
         while (true) {
-            index.compareAndSet(index.get(), (index.get() + 1) % serverCount);
-            if (index.get() == 0) {
-                index.set(maxWeight);
-                if (--gcdWeight <= 0) {
-                    gcdWeight = gcd(instances);
-                    if (gcdWeight <= 0) {
-                        break;
-                    }
+            int currentIdx = currentIndex.updateAndGet(idx -> (idx + 1) % instances.size());
+            if (currentIdx == 0) {
+                int newWeight = currentWeight.updateAndGet(w -> w - gcdWeight);
+                if (newWeight <= 0) {
+                    newWeight = maxWeight;
+                    currentWeight.set(newWeight);
                 }
             }
-            int i = index.get();
-            if (instances.get(i).getWeight() >= i) {
-                return instances.get(i);
+
+            Instance instance = instances.get(currentIdx);
+            if (instance.getWeight() >= currentWeight.get()) {
+                return instance;
             }
         }
-        return null;
     }
 
-    private int gcd(List<Instance> instances) {
-        int result = 0;
+    private int calculateGCD(List<Instance> instances) {
+        int gcd = 0;
         for (Instance instance : instances) {
-            result = gcd(result, (int) instance.getWeight());
+            gcd = gcd(gcd, (int)instance.getWeight());
         }
-        return result;
+        return gcd;
     }
 
     private int gcd(int a, int b) {
-        if (b == 0) {
-            return a;
-        } else {
-            return gcd(b, a % b);
-        }
+        return (b == 0) ? a : gcd(b, a % b);
     }
 }

@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 @Component("roundRobinLoadBalancer")
 @Lazy
+//轮询
 public class RoundRobinLoadBalancer implements LoadBalancerStrategy {
     private final AtomicInteger index = new AtomicInteger(0);
 

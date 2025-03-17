@@ -24,3 +24,6 @@ load:
 netty:
   port: 9090
   times: 3
+  maxQps: 1000 # 全局最大QPS
+  tokenRefillRate: 200 # 令牌桶每秒填充速率
+  maxBurst: 500 # 令牌桶容量

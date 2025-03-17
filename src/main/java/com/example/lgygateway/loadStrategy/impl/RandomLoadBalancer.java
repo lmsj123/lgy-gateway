@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Random;
 @Component("randomLoadBalancer")
 @Lazy
+//随机
 public class RandomLoadBalancer implements LoadBalancerStrategy {
     private final Random random = new Random();
 

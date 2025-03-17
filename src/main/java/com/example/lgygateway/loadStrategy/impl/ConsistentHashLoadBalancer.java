@@ -2,56 +2,75 @@ package com.example.lgygateway.loadStrategy.impl;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
+import org.apache.curator.shaded.com.google.common.hash.Hashing;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-import java.util.SortedMap;
-import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.*;
+import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.stream.Collectors;
 
 @Component("consistentHashLoad")
 @Lazy
 public class ConsistentHashLoadBalancer implements LoadBalancerStrategy {
-    private final SortedMap<Integer, Instance> circle = new TreeMap<>();
-    private final AtomicInteger virtualNodes = new AtomicInteger(3); // 虚拟节点数
+    private static final int VIRTUAL_NODES_PER_INSTANCE = 160;
+    private final ConcurrentNavigableMap<Integer, Instance> circle = new ConcurrentSkipListMap<>();
+    private volatile List<Instance> lastKnownInstances = Collections.emptyList();
 
     @Override
     public Instance selectInstance(List<Instance> instances) {
-        if (instances == null || instances.isEmpty()) {
+        if (instances.isEmpty()) {
             return null;
         }
 
-        // 初始化哈希环
-        if (circle.isEmpty()) {
-            for (Instance instance : instances) {
-                addInstanceToCircle(instance);
-            }
+        // 检测实例变化并重建环
+        if (hasInstanceListChanged(instances)) {
+            rebuildCircle(instances);
         }
 
-        // 根据请求的哈希值选择实例
-        String requestKey = generateRequestKey(); // 生成请求的唯一标识
+        // 生成请求键并哈希
+        String requestKey = generateRequestKey();
         int hash = hash(requestKey);
-        SortedMap<Integer, Instance> tailMap = circle.tailMap(hash);
+
+        // 查找最近的节点
+        ConcurrentNavigableMap<Integer, Instance> tailMap = circle.tailMap(hash);
         int nodeHash = tailMap.isEmpty() ? circle.firstKey() : tailMap.firstKey();
         return circle.get(nodeHash);
     }
 
-    private void addInstanceToCircle(Instance instance) {
-        for (int i = 0; i < virtualNodes.get(); i++) {
-            String virtualNodeName = instance.getIp() + ":" + instance.getPort() + "#" + i;
-            int hash = hash(virtualNodeName);
-            circle.put(hash, instance);
+    private boolean hasInstanceListChanged(List<Instance> currentInstances) {
+        // 通过实例ID集合判断是否变化
+        Set<String> currentIds = currentInstances.stream()
+                .map(Instance::getInstanceId)
+                .collect(Collectors.toSet());
+        Set<String> circleIds = circle.values().stream()
+                .map(Instance::getInstanceId)
+                .collect(Collectors.toSet());
+        return !currentIds.equals(circleIds);
+    }
+
+    private void rebuildCircle(List<Instance> instances) {
+        ConcurrentNavigableMap<Integer, Instance> newCircle = new ConcurrentSkipListMap<>();
+        for (Instance instance : instances) {
+            for (int i = 0; i < VIRTUAL_NODES_PER_INSTANCE; i++) {
+                String virtualNode = instance.getInstanceId() + "#" + i;
+                int hash = hash(virtualNode);
+                newCircle.put(hash, instance);
+            }
         }
+        circle.clear();
+        circle.putAll(newCircle);
+        lastKnownInstances = new ArrayList<>(instances);
     }
 
     private String generateRequestKey() {
-        // 生成请求的唯一标识（可以根据实际需求实现）
-        return String.valueOf(System.currentTimeMillis());
+        // 实际项目应从请求上下文中获取特征（如用户ID）
+        return UUID.randomUUID().toString();
     }
 
     private int hash(String key) {
-        // 简单的哈希函数（可以使用更复杂的算法，如 MD5、MurmurHash）
-        return key.hashCode();
+        // 使用Guava MurmurHash32
+        return Hashing.murmur3_32().hashUnencodedChars(key).asInt() & 0x7FFFFFFF;
     }
 }

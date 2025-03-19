@@ -1,0 +1,4 @@
+# META-INF/services/com.example.Filter
+com.example.lgygateway.filters.impl.AuthFilter
+com.example.lgygateway.filters.impl.LoggingFilter
+com.example.lgygateway.filters.impl.RateLimitFilter

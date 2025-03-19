@@ -52,7 +52,6 @@
             <artifactId>netty-all</artifactId>
             <version>4.1.109.Final</version>
         </dependency>
-
         <!-- Nacos -->
         <dependency>
             <groupId>com.alibaba.nacos</groupId>

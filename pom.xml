@@ -84,11 +84,7 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
         <!--nacos配置中心-->
-        <dependency>
-            <groupId>com.alibaba.cloud</groupId>
-            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
-            <version>2023.0.1.2</version>
-        </dependency>
+
     </dependencies>
 
     <build>

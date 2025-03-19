@@ -1,0 +1,2 @@
+#只能指定一个 如果指定多个以最后为准
+com.example.lgygateway.loadStrategy.impl.RoundRobinLoadBalancer

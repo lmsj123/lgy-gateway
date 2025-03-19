@@ -16,9 +16,6 @@ zookeeper:
   ip: ""
   port: ""
 
-#配置负载均衡规则
-load:
-  load-strategy: "roundRobinLoadBalancer"
 
 #配置netty所监听的端口
 netty:

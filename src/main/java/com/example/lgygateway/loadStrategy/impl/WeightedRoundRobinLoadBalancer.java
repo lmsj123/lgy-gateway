@@ -2,14 +2,9 @@ package com.example.lgygateway.loadStrategy.impl;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
-import org.springframework.context.annotation.Lazy;
-import org.springframework.stereotype.Component;
-
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-@Component("weightedRoundRobinLoadBalancer")
-@Lazy
+
 public class WeightedRoundRobinLoadBalancer implements LoadBalancerStrategy {
     private final AtomicInteger currentIndex = new AtomicInteger(-1); // 当前索引
     private final AtomicInteger currentWeight = new AtomicInteger(0); // 当前权重

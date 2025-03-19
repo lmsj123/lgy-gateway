@@ -3,16 +3,12 @@ package com.example.lgygateway.loadStrategy.impl;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
 import org.apache.curator.shaded.com.google.common.hash.Hashing;
-import org.springframework.context.annotation.Lazy;
-import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.stream.Collectors;
 
-@Component("consistentHashLoad")
-@Lazy
 public class ConsistentHashLoadBalancer implements LoadBalancerStrategy {
     private static final int VIRTUAL_NODES_PER_INSTANCE = 160;
     private final ConcurrentNavigableMap<Integer, Instance> circle = new ConcurrentSkipListMap<>();

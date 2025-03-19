@@ -30,7 +30,6 @@ BackendHandler异步处理后端响应，通过ChannelHandlerContext回写结果
 使用eventLoop.schedule()实现非阻塞定时任务，避免阻塞I/O线程
  */
 
-import com.example.lgygateway.Exception.AcquireTimeoutException;
 import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.limit.SlidingWindowCounter;
 import com.example.lgygateway.limit.TokenBucket;
@@ -104,7 +103,7 @@ public class AsyncNettyHttpServer {
         @Override
         public void channelAcquired(Channel ch) throws Exception {
             if (!tokenBucket.tryAcquire(1)) {
-                throw new AcquireTimeoutException("Rate limit exceeded");
+                throw new RuntimeException("Rate limit exceeded");
             }
         }
 

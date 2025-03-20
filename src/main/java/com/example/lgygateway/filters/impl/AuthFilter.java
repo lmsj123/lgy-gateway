@@ -8,7 +8,7 @@ import io.netty.handler.codec.http.*;
 
 public class AuthFilter implements Filter {
     @Override
-    public void filter(FullContext context, FilterChain chain) {
+    public void filter(FullContext context, FilterChain chain,int index) {
         Log.logger.info("正在验证权限");
         FullHttpRequest request = context.getRequest();
         String token = request.headers().get("Authorization");
@@ -21,7 +21,7 @@ public class AuthFilter implements Filter {
         }
 
         // 认证通过，继续执行下一个过滤器
-        chain.doFilter(context);
+        chain.doFilter(context,index);
         Log.logger.info("权限验证通过");
     }
 

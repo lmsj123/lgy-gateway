@@ -59,7 +59,7 @@ public class RouteTable {
         //当过滤链中出现无法过滤时 对response添加相应内容 提示无法成功过滤
         FullContext fullContext = new FullContext();
         fullContext.setRequest(request);
-        filterChain.doFilter(fullContext);
+        filterChain.doFilter(fullContext,0);
         Log.logger.info("判断是否成功过滤" + (fullContext.getResponse() == null) );
         return fullContext.getResponse() == null;
     }

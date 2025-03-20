@@ -4,5 +4,5 @@ import com.example.lgygateway.filters.models.FilterChain;
 import com.example.lgygateway.filters.models.FullContext;
 
 public interface Filter {
-    void filter(FullContext context, FilterChain filterChain);
+    void filter(FullContext context, FilterChain filterChain,int index);
 }

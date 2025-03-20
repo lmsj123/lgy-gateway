@@ -45,9 +45,9 @@ public class NacosRegistry implements Registry {
         }
         //功能为：通过服务名拿到对应的示例
         namingService = NacosFactory.createNamingService(nacosConfig.getIp() + ":" + nacosConfig.getPort());
+        configService = NacosFactory.createConfigService(nacosConfig.getIp() + ":" + nacosConfig.getPort());
         updateRouteRules();
         //后续监听路由规则是否更改
-        configService = NacosFactory.createConfigService(nacosConfig.getIp() + ":" + nacosConfig.getPort());
         configService.addListener(nacosConfig.getDataId(), nacosConfig.getGroup(), new Listener() {
             @Override
             public void receiveConfigInfo(String configInfo) {

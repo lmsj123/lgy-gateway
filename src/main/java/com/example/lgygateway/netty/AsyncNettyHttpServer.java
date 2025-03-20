@@ -1,35 +1,4 @@
 package com.example.lgygateway.netty;
-/*
-关键方法详细解读
-1. initializeClientBootstrap()
-功能：配置客户端连接参数，初始化ChannelPipeline。
-异步点：
-HttpClientCodec和HttpObjectAggregator实现HTTP请求的编码与聚合。
-BackendHandler异步处理后端响应，通过ChannelHandlerContext回写结果。
-2. GatewayHandler.channelRead0()
-流程：
-接收客户端请求，通过路由表匹配目标服务地址。
-调用forwardRequestWithRetry()发起异步转发。
-异步点：
-路由匹配和转发操作均在EventLoop线程中执行，不阻塞其他请求
-3. forwardRequestWithRetry()
-流程：
-解析目标URI，建立异步连接（clientBootstrap.connect()）。
-通过ChannelFuture监听连接结果，成功时异步写入请求，失败时触发重试。
-异步点：
-连接和写入操作均通过addListener注册回调，避免阻塞当前线程
-4. BackendHandler.channelRead0()
-流程：
-接收后端响应，复制响应头和内容。
-通过frontendCtx.writeAndFlush()异步回写给客户端。
-异步点：
-响应回写通过ChannelFutureListener.CLOSE在完成时关闭连接，全程非阻塞
-5. handleRetry()
-功能：在EventLoop线程中调度延迟重试任务。
-异步点：
-使用eventLoop.schedule()实现非阻塞定时任务，避免阻塞I/O线程
- */
-
 import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.limit.SlidingWindowCounter;
 import com.example.lgygateway.limit.TokenBucket;
@@ -93,7 +62,7 @@ public class AsyncNettyHttpServer {
     private static final int ACQUIRE_TIMEOUT_MS = 5000; // 获取连接超时时间
 
     // 自定义ChannelPoolHandler
-    static class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
+    class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
         private final TokenBucket tokenBucket;
 
         public CustomChannelPoolHandler(TokenBucket tokenBucket) {
@@ -111,14 +80,15 @@ public class AsyncNettyHttpServer {
         public void channelCreated(Channel ch) {
             // 初始化Channel的Pipeline（与客户端Bootstrap配置一致）
             ch.pipeline()
-                    .addLast(new HttpClientCodec())
-                    .addLast(new HttpObjectAggregator(65536));
+                    .addLast(new HttpClientCodec()) // 客户端应使用HttpClientCodec
+                    .addLast(new HttpObjectAggregator(65536))
+                    .addLast(new BackendHandler());
         }
 
         @Override
         public void channelReleased(Channel ch) {
             // 可选：释放时清理Channel状态
-            ch.pipeline().remove(BackendHandler.class);
+//            ch.pipeline().remove(BackendHandler.class);
         }
     }
 
@@ -135,10 +105,12 @@ public class AsyncNettyHttpServer {
     @Autowired
     public AsyncNettyHttpServer(RegistryFactory registryFactory) {
         //获取注册中心
+        Log.logger.info("正在获取注册中心");
         Registry registry = registryFactory.getRegistry();
         if (registry == null) {
             throw new IllegalStateException("Registry initialization failed");
         }
+        Log.logger.info("获取注册中心成功");
         //内部是使用了io多路复用 支持高并发连接 创建客户端线程组（默认cpu核心数*2）
         this.clientGroup = new NioEventLoopGroup();
         //建立长连接，复用线程和连接资源，避免传统同步HTTP客户端的线程阻塞问题
@@ -146,7 +118,9 @@ public class AsyncNettyHttpServer {
         this.poolMap = new AbstractChannelPoolMap<>() {
             @Override
             protected FixedChannelPool newPool(InetSocketAddress key) {
+                Log.logger.info("正在初始化令牌桶限流策略");
                 TokenBucket tokenBucket = bucketMap.computeIfAbsent(key, k -> new TokenBucket(nettyConfig.getMaxBurst(), nettyConfig.getTokenRefillRate()));
+                Log.logger.info("正在初始化由ip端口获取的连接池（线程隔离的思路");
                 return new FixedChannelPool(
                         clientBootstrap.remoteAddress(key),
                         new CustomChannelPoolHandler(tokenBucket),
@@ -170,12 +144,14 @@ public class AsyncNettyHttpServer {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        Log.logger.info("正在初始化BackendHandler（响应阶段）");
                         ch.pipeline()
-                                .addLast(new HttpClientCodec()) // http请求编码/响应编码
-                                .addLast(new HttpObjectAggregator(65536))// 聚合分块http消息为完整对象
-                                .addLast(new BackendHandler());// 处理后端服务请求
+                                .addLast(new HttpClientCodec()) // 客户端应使用HttpClientCodec
+                                .addLast(new HttpObjectAggregator(65536))
+                                .addLast(new BackendHandler());
                     }
                 });
+
     }
 
     @PostConstruct
@@ -188,16 +164,18 @@ public class AsyncNettyHttpServer {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        Log.logger.info("正在初始化GatewayHandler（请求阶段）");
                         ch.pipeline()
-                                .addLast(new HttpObjectAggregator(65536)) // 聚合客户端请求
-                                .addLast(new HttpRequestDecoder()) // 将字节流解析成http请求对象
-                                .addLast(new HttpResponseEncoder()) // 将http响应对象编码成字节流
+                                //顺序不可更改
+                                .addLast(new HttpServerCodec())
+                                .addLast(new HttpObjectAggregator(65536))// 聚合客户端请求
                                 .addLast(new GatewayHandler()); // 处理网关逻辑
                     }
                 })
                 .option(ChannelOption.SO_BACKLOG, 128) // 等待连接队列大小
-                .childOption(ChannelOption.SO_KEEPALIVE, true); // 保持客户端连接
-
+                .childOption(ChannelOption.SO_KEEPALIVE, true)// 保持客户端连接
+                .childOption(ChannelOption.AUTO_READ,true);
+        Log.logger.info("netty绑定端口为{}",nettyConfig.getPort());
         ChannelFuture f = b.bind(nettyConfig.getPort()).sync(); // 绑定端口并启动
         f.channel().closeFuture().sync(); // 阻塞直至服务端通道关闭
     }
@@ -208,8 +186,11 @@ public class AsyncNettyHttpServer {
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
+            Log.logger.info("接受到来自{}的请求",request.uri());
             // 全局限流检查
+            Log.logger.info("正在根据滑动窗口判断是否需要限流");
             if (!counter.allowRequest(nettyConfig.getMaxQps())) {
+                Log.logger.info("该请求被限流");
                 sendErrorResponse(ctx, HttpResponseStatus.TOO_MANY_REQUESTS);
                 return;
             }
@@ -217,9 +198,11 @@ public class AsyncNettyHttpServer {
             FullHttpRequest httpRequest = routeTable.matchRouteAsync(request.uri(), request);
 
             if (httpRequest != null) {
+                Log.logger.info("路由匹配成功");
                 forwardRequestWithRetry(ctx, httpRequest, nettyConfig.getTimes());// 转发请求并允许重试 次数可配置
                 return;
             }
+            Log.logger.info("路由匹配失败");
             sendErrorResponse(ctx, HttpResponseStatus.NOT_FOUND); // 未匹配路由返回404
         }
     }
@@ -238,23 +221,36 @@ public class AsyncNettyHttpServer {
             InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
             //获取或创建连接池
             FixedChannelPool pool = poolMap.get(inetSocketAddress);
-
+            request.headers().set(HttpHeaderNames.HOST, uri.getHost() + ':' + uri.getPort());
+            request.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
             //从池中获取channel
+            Log.logger.info("正在从连接池中获取连接");
             pool.acquire().addListener((Future<Channel> future) -> {
                 //当异步获取pool中的channel成功时会进入下面的分支
                 if (future.isSuccess()) {
+                    Log.logger.info("获取连接成功");
                     Channel channel = future.getNow();
                     try {
                         //绑定元数据到channel
                         channel.attr(REQUEST_ID_KEY).set(requestId);
                         //发送请求
-                        channel.writeAndFlush(request);
+                        channel.writeAndFlush(request).addListener((ChannelFuture writeFuture) -> {
+                            if (writeFuture.isSuccess()) {
+                                Log.logger.info("成功发送请求");
+                                // 可在此处记录成功日志
+                                pool.release(channel);
+                            } else {
+                                // 处理失败：记录异常、重试或响应错误
+                                Log.logger.info("发送请求失败");
+                                handleSendError(ctx, pool, channel, writeFuture.cause());
+                                pool.release(channel); // 确保异常后释放连接
+                            }
+                        });
                     } catch (Exception e) {
                         handleSendError(ctx, pool, channel, e);
-                    } finally {
-                        pool.release(channel);
                     }
                 } else {
+                    Log.logger.info("获取连接失败");
                     // 获取连接失败处理
                     handleAcquireFailure(ctx, request, retries, future.cause());
                 }
@@ -277,11 +273,13 @@ public class AsyncNettyHttpServer {
     // 处理连接获取失败
     private void handleAcquireFailure(ChannelHandlerContext ctx, FullHttpRequest request, int retries, Throwable cause) {
         if (retries > 0) {
+            Log.logger.info("正在重试 重试次数还剩余 {}",retries);
             ctx.channel().eventLoop().schedule(() ->
                             forwardRequestWithRetry(ctx, request, retries - 1),
                     1000, TimeUnit.MILLISECONDS
             );
         } else {
+            Log.logger.info("重试次数为0 发送响应失败请求");
             request.release();
             sendErrorResponse(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE);
         }
@@ -314,22 +312,24 @@ public class AsyncNettyHttpServer {
     private class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
         @Override
         protected void channelRead0(ChannelHandlerContext backendCtx, FullHttpResponse backendResponse) {
+            Log.logger.info("正在解析响应");
             // 获取关联的原始请求和剩余重试次数
             String requestId = backendCtx.channel().attr(REQUEST_ID_KEY).get();
+            Log.logger.info("Received backend response for ID: " + requestId +
+                    " Status: " + backendResponse.status());
             RequestContext context = requestContextMap.get(requestId);
+            requestContextMap.remove(requestId);
             if (context != null) {
                 // 判断是否符合重试条件
                 if (shouldRetry(backendResponse, context.getOriginalRequest())) {
+                    Log.logger.info("响应符合重试条件 正在尝试重试");
                     handleRetry(context.getFrontendCtx(), context.originalRequest, context.remainingRetries);
                 } else {
+                    Log.logger.info("响应成功 准备返回");
                     forwardResponseToClient(context.getFrontendCtx(), backendResponse, backendCtx);// 正常响应转发
                 }
             }
             backendCtx.close();// 关闭后端连接
-            //释放连接
-            if (context != null && context.originalRequest != null) {
-                context.originalRequest.release();
-            }
         }
 
         private boolean shouldRetry(FullHttpResponse response, FullHttpRequest request) {
@@ -363,6 +363,7 @@ public class AsyncNettyHttpServer {
             }
             ctx.writeAndFlush(clientResponse)
                     .addListener(ChannelFutureListener.CLOSE); // 发送并关闭
+            Log.logger.info("正在返回响应");
         }
     }
 
@@ -380,6 +381,7 @@ public class AsyncNettyHttpServer {
     }
 
     private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status) {
+        Log.logger.warn("正在发送失败响应");
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HTTP_1_1,
                 status,
@@ -395,4 +397,5 @@ public class AsyncNettyHttpServer {
         ctx.writeAndFlush(response)
                 .addListener(ChannelFutureListener.CLOSE);
     }
+
 }

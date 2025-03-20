@@ -6,10 +6,10 @@ registration:
 
 #此为nacos路由配置的相关属性
 nacos:
-  ip: ""
-  port: ""
-  dataId: ""
-  group: ""
+  ip: 127.0.0.1
+  port: 8848
+  dataId: 1
+  group: route
 
 #此为nacos路由配置的相关属性
 zookeeper:
@@ -19,7 +19,7 @@ zookeeper:
 
 #配置netty所监听的端口
 netty:
-  port: 9090
+  port: 10001
   times: 3
   maxQps: 1000 # 全局最大QPS
   tokenRefillRate: 200 # 令牌桶每秒填充速率

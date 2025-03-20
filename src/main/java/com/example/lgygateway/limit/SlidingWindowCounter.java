@@ -50,7 +50,7 @@ public class SlidingWindowCounter {
             slices[i] = new Slice(now - (sliceCount - i) * sliceIntervalMs);
         }
         this.currentIndex = sliceCount - 1;
-        this.windowStartTime = now - windowSizeSec * 1000;
+        this.windowStartTime = now - windowSizeSec * 1000L;
 
         // 启动后台任务
         startSliceRotator();
@@ -112,7 +112,7 @@ public class SlidingWindowCounter {
 
             // 更新当前索引和窗口起始时间
             currentIndex = (index + steps) % sliceCount;
-            windowStartTime = now - windowSizeSec * 1000;
+            windowStartTime = now - windowSizeSec * 1000L;
             return slices[currentIndex];
         } finally {
             sliceResetLock.unlock();
@@ -121,9 +121,7 @@ public class SlidingWindowCounter {
 
     // 后台任务1: 定期轮转分片
     private void startSliceRotator() {
-        scheduler.scheduleAtFixedRate(() -> {
-            rotateSlices(System.currentTimeMillis());
-        }, sliceIntervalMs, sliceIntervalMs, TimeUnit.MILLISECONDS);
+        scheduler.scheduleAtFixedRate(() -> rotateSlices(System.currentTimeMillis()), sliceIntervalMs, sliceIntervalMs, TimeUnit.MILLISECONDS);
     }
 
     // 后台任务2: 定期更新总请求数缓存
@@ -145,4 +143,5 @@ public class SlidingWindowCounter {
     public void shutdown() {
         scheduler.shutdown();
     }
+
 }

@@ -8,19 +8,14 @@ import com.example.lgygateway.loadStrategy.LoadServer;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
 import com.example.lgygateway.utils.Log;
 import io.netty.handler.codec.http.*;
-import org.apache.http.client.methods.*;
-import org.apache.http.entity.ByteArrayEntity;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static io.netty.handler.codec.http.HttpMethod.*;
-import static io.netty.handler.codec.http.HttpMethod.DELETE;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
 @Component
@@ -36,8 +31,8 @@ public class RouteTable {
         ConcurrentHashMap<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
         //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
         //也会对后续匹配进行优化
+        Log.logger.info("正在判断该请求是否符合转发标准 {}",url);
         for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
-            Log.logger.info("正在判断该请求是否符合转发标准 {}",url);
             //当查询到请求中符合网关转发规则
             if (url.contains(entry.getKey()) && successFiltering(request)) {
                 Log.logger.info("符合转发标准，正在获取实例");

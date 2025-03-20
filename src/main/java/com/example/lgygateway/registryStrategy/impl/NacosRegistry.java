@@ -5,9 +5,12 @@ import com.alibaba.nacos.api.config.ConfigService;
 import com.alibaba.nacos.api.config.listener.Listener;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.NamingService;
+import com.alibaba.nacos.api.naming.listener.Event;
+import com.alibaba.nacos.api.naming.listener.EventListener;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.NacosConfig;
 import com.example.lgygateway.registryStrategy.Registry;
+import com.example.lgygateway.utils.Log;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
@@ -18,13 +21,14 @@ import org.springframework.stereotype.Component;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.stream.Collectors;
 
 @Component("nacos")
 @Lazy
 public class NacosRegistry implements Registry {
     @Autowired
     private NacosConfig nacosConfig;
+    // 已订阅的服务名集合（防止重复订阅）
+    private final Set<String> subscribedServices = new HashSet<>();
     @Override
     public ConcurrentHashMap<String, List<Instance>> getRouteRules() {
         return routeRules;
@@ -75,26 +79,59 @@ public class NacosRegistry implements Registry {
         }
     }
     private void parseAndUpdateRouteRules(String content) {
-        // 注册中心的相关路由规则可能为 JSON format: {"/xxxx": "xxxxServer", ...}
         ObjectMapper objectMapper = new ObjectMapper();
         try {
-            // 示例： “/xxxx" : "http://xxxxServer"
-            Map<String, String> newRouteRules = objectMapper.readValue(content, new TypeReference<>() {
+            Map<String, String> newRouteRules = objectMapper.readValue(content, new TypeReference<>() {});
+            Map<String, List<Instance>> rules = new HashMap<>();
+
+            // 遍历所有路由规则中的服务名，注册实例变更监听
+            newRouteRules.forEach((path, serviceName) -> {
+                try {
+                    // 获取当前服务实例并存入路由表
+                    List<Instance> instances = namingService.getAllInstances(serviceName);
+                    if (!instances.isEmpty()) {
+                        rules.put(path, instances);
+                    }
+                    // 注册服务实例变更监听器（核心新增代码）
+                    if (!subscribedServices.contains(serviceName)) {
+                        namingService.subscribe(serviceName,new InstanceChangeListener(serviceName,path));
+                        subscribedServices.add(serviceName);
+                    }
+                } catch (NacosException e) {
+                    throw new RuntimeException("无法获取服务实例: " + serviceName, e);
+                }
             });
 
-            Map<String, List<Instance>> rules = newRouteRules.entrySet().stream().collect(Collectors.toMap(
-                    Map.Entry::getKey,
-                    entry -> {
-                        try {
-                            return namingService.getAllInstances(entry.getValue());
-                        } catch (NacosException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }));
+            // 清空旧路由规则并更新
             routeRules.clear();
             routeRules.putAll(rules);
         } catch (Exception e) {
             e.fillInStackTrace();
+        }
+    }
+    private class InstanceChangeListener implements EventListener {
+        private final String serviceName;
+        private final String path;
+
+        public InstanceChangeListener(String serviceName, String path) {
+            this.serviceName = serviceName;
+            this.path = path;
+        }
+
+        @Override
+        public void onEvent(Event event) {
+            try {
+                // 获取最新实例列表并更新路由
+                List<Instance> newInstances = namingService.getAllInstances(serviceName);
+                if (newInstances.isEmpty()) {
+                    Log.logger.info(path + "该路由相关信息已删除");
+                }else {
+                    routeRules.put(path, newInstances);
+                }
+                Log.logger.info("服务实例更新: " + serviceName + " -> " + newInstances);
+            } catch (NacosException e) {
+                // 异常处理...
+            }
         }
     }
 }

@@ -27,11 +27,15 @@ import org.springframework.stereotype.Component;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static io.netty.handler.codec.http.HttpResponseStatus.TOO_MANY_REQUESTS;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
 @Component
@@ -50,6 +54,8 @@ public class AsyncNettyHttpServer {
         private int remainingRetries;
         // 存储长连接信息
         private boolean keepAlive;
+        // 存储过期时间
+        private long lastAccessTime;
     }
 
     // 定义全局的请求上下文缓存（线程安全）
@@ -60,20 +66,14 @@ public class AsyncNettyHttpServer {
     private final ChannelPoolMap<InetSocketAddress, FixedChannelPool> poolMap;
     private static final int MAX_CONNECTIONS = 50;      // 每个后端地址最大连接数
     private static final int ACQUIRE_TIMEOUT_MS = 5000; // 获取连接超时时间
-
+    //滑动窗口限流
+    private final SlidingWindowCounter counter = new SlidingWindowCounter(60, 600);
     // 自定义ChannelPoolHandler
     class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
-        private final TokenBucket tokenBucket;
-
-        public CustomChannelPoolHandler(TokenBucket tokenBucket) {
-            this.tokenBucket = tokenBucket;
-        }
 
         @Override
-        public void channelAcquired(Channel ch) throws Exception {
-            if (!tokenBucket.tryAcquire(1)) {
-                throw new RuntimeException("Rate limit exceeded");
-            }
+        public void channelAcquired(Channel ch){
+
         }
 
         @Override
@@ -118,22 +118,43 @@ public class AsyncNettyHttpServer {
         this.poolMap = new AbstractChannelPoolMap<>() {
             @Override
             protected FixedChannelPool newPool(InetSocketAddress key) {
-                Log.logger.info("正在初始化令牌桶限流策略");
-                TokenBucket tokenBucket = bucketMap.computeIfAbsent(key, k -> new TokenBucket(nettyConfig.getMaxBurst(), nettyConfig.getTokenRefillRate()));
-                Log.logger.info("正在初始化由ip端口获取的连接池（线程隔离的思路");
-                return new FixedChannelPool(
+                Log.logger.info("正在初始化由ip端口获取的连接池（线程隔离的思路）");
+                FixedChannelPool pool = new FixedChannelPool(
                         clientBootstrap.remoteAddress(key),
-                        new CustomChannelPoolHandler(tokenBucket),
+                        new CustomChannelPoolHandler(),
                         ChannelHealthChecker.ACTIVE, //使用默认健康检查
                         FixedChannelPool.AcquireTimeoutAction.FAIL,//获取超时后抛出异常
                         5000,
                         MAX_CONNECTIONS,
                         ACQUIRE_TIMEOUT_MS
                 );
+                Log.logger.info("正在预热连接");
+                // 预热10%连接
+                int warmupConnections = (int)(MAX_CONNECTIONS * 0.1);
+                for (int i = 0; i < warmupConnections; i++) {
+                    pool.acquire();
+                }
+                return pool;
             }
         };
         //配置客户端bootstrap
         initializeClientBootstrap();
+        //删除过期内容
+        deleteOutTime();
+    }
+
+    private void deleteOutTime() {
+        Executors.newSingleThreadScheduledExecutor()
+                .scheduleAtFixedRate(() -> {
+                    Iterator<Map.Entry<String, RequestContext>> it = requestContextMap.entrySet().iterator();
+                    while (it.hasNext()) {
+                        Map.Entry<String, RequestContext> entry = it.next();
+                        if (System.currentTimeMillis() - entry.getValue().getLastAccessTime() > 300_000) { // 5分钟
+                            it.remove();
+                            entry.getValue().getOriginalRequest().release(); // 释放缓冲区
+                        }
+                    }
+                }, 5, 5, TimeUnit.MINUTES);
     }
 
     private void initializeClientBootstrap() {
@@ -182,7 +203,6 @@ public class AsyncNettyHttpServer {
 
     //发送端
     private class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
-        private final SlidingWindowCounter counter = new SlidingWindowCounter(60, 1);
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
@@ -191,7 +211,7 @@ public class AsyncNettyHttpServer {
             Log.logger.info("正在根据滑动窗口判断是否需要限流");
             if (!counter.allowRequest(nettyConfig.getMaxQps())) {
                 Log.logger.info("该请求被限流");
-                sendErrorResponse(ctx, HttpResponseStatus.TOO_MANY_REQUESTS);
+                sendErrorResponse(ctx, TOO_MANY_REQUESTS);
                 return;
             }
             //路由匹配
@@ -210,15 +230,22 @@ public class AsyncNettyHttpServer {
     //使用了连接池长连接 避免每次都进行tcp连接
     private void forwardRequestWithRetry(ChannelHandlerContext ctx, FullHttpRequest request, int retries) {
         try {
-
+            URI uri = new URI(request.uri());
+            InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
+            Log.logger.info("正在初始化令牌桶限流策略");
+            TokenBucket tokenBucket = bucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getMaxBurst(), nettyConfig.getTokenRefillRate()));
+            if (!tokenBucket.tryAcquire(1)){
+                Log.logger.info("该请求被限流");
+                sendErrorResponse(ctx, TOO_MANY_REQUESTS);
+                return;
+            }
             String requestId = UUID.randomUUID().toString(); // 生成唯一ID
             ctx.channel().attr(REQUEST_ID_KEY).set(requestId); // 绑定到Channel属性（仅存储ID）
 
             // 存储到全局缓存（包含完整上下文）
-            requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request)));
+            requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request),System.currentTimeMillis()));
 
-            URI uri = new URI(request.uri());
-            InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
+
             //获取或创建连接池
             FixedChannelPool pool = poolMap.get(inetSocketAddress);
             request.headers().set(HttpHeaderNames.HOST, uri.getHost() + ':' + uri.getPort());
@@ -274,6 +301,12 @@ public class AsyncNettyHttpServer {
     private void handleAcquireFailure(ChannelHandlerContext ctx, FullHttpRequest request, int retries, Throwable cause) {
         if (retries > 0) {
             Log.logger.info("正在重试 重试次数还剩余 {}",retries);
+            // 新增滑动窗口检查
+            if (!counter.allowRequest(nettyConfig.getMaxQps())) {
+                Log.logger.info("该请求被限流");
+                sendErrorResponse(ctx, TOO_MANY_REQUESTS);
+                return;
+            }
             ctx.channel().eventLoop().schedule(() ->
                             forwardRequestWithRetry(ctx, request, retries - 1),
                     1000, TimeUnit.MILLISECONDS
@@ -289,6 +322,11 @@ public class AsyncNettyHttpServer {
     private void handleRetry(ChannelHandlerContext ctx, FullHttpRequest request, Integer retries) {
         Log.logger.warn("Retrying request to {} (remaining {} retries)", request.uri(), retries);
         if (retries != null && retries > 0) {
+            if (!counter.allowRequest(nettyConfig.getMaxQps())) {
+                Log.logger.info("该请求被限流");
+                sendErrorResponse(ctx, TOO_MANY_REQUESTS);
+                return;
+            }
             // 计算指数退避时间（例：2^retries秒）
             int baseDelay = 1;
             int delaySeconds = (int) Math.pow(2, (nettyConfig.getTimes() - retries)) * baseDelay;
@@ -317,8 +355,10 @@ public class AsyncNettyHttpServer {
             String requestId = backendCtx.channel().attr(REQUEST_ID_KEY).get();
             Log.logger.info("Received backend response for ID: " + requestId +
                     " Status: " + backendResponse.status());
-            RequestContext context = requestContextMap.get(requestId);
-            requestContextMap.remove(requestId);
+            RequestContext context = requestContextMap.computeIfPresent(requestId, (k, v) -> {
+                v.lastAccessTime = System.currentTimeMillis();
+                return v;
+            });
             if (context != null) {
                 // 判断是否符合重试条件
                 if (shouldRetry(backendResponse, context.getOriginalRequest())) {
@@ -338,11 +378,6 @@ public class AsyncNettyHttpServer {
                     response.status().code() < 600 &&
                     request != null &&
                     !request.method().equals(HttpMethod.POST);
-        }
-
-        // 在BackendHandler中获取前端上下文
-        private ChannelHandlerContext getFrontendContext(ChannelHandlerContext backendCtx) {
-            return backendCtx.channel().attr(AttributeKey.<ChannelHandlerContext>valueOf("frontendCtx")).get();
         }
 
         private void forwardResponseToClient(ChannelHandlerContext ctx, FullHttpResponse response, ChannelHandlerContext backendCtx) {

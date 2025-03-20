@@ -15,7 +15,7 @@ public class TokenBucket {
         this.availableTokens = new AtomicLong(capacity);
     }
 
-    public boolean tryAcquire(int tokens) {
+    public synchronized boolean tryAcquire(int tokens) {
         refill();
         long currentAvailable = availableTokens.get();
         while (currentAvailable >= tokens) {

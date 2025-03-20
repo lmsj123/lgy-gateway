@@ -60,6 +60,7 @@ public class RouteTable {
         FullContext fullContext = new FullContext();
         fullContext.setRequest(request);
         filterChain.doFilter(fullContext);
+        Log.logger.info("判断是否成功过滤" + (fullContext.getResponse() == null) );
         return fullContext.getResponse() == null;
     }
     // 根据原始请求创建新的HTTP请求对象

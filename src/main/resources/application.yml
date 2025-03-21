@@ -11,7 +11,7 @@ nacos:
   dataId: 1
   group: route
 
-#此为nacos路由配置的相关属性
+#此为zookeeper路由配置的相关属性
 zookeeper:
   ip: ""
   port: ""
@@ -22,5 +22,9 @@ netty:
   port: 10001
   times: 3
   maxQps: 1000 # 全局最大QPS
-  tokenRefillRate: 200 # 令牌桶每秒填充速率
-  maxBurst: 500 # 令牌桶容量
+  serviceTokenRefillRate: 200 # 服务令牌桶每秒填充速率
+  serviceMaxBurst: 500 # 服务令牌桶容量
+  userTokenRefillRate: 200
+  userMaxBurst: 500
+  noUserTokenRefillRate: 200
+  noUserMaxBurst: 500

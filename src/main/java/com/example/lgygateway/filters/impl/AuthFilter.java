@@ -12,13 +12,13 @@ public class AuthFilter implements Filter {
         Log.logger.info("正在验证权限");
         FullHttpRequest request = context.getRequest();
         String token = request.headers().get("Authorization");
-        if (token == null || !isValidToken(token)) {
-            // 认证失败，返回 401
-            FullHttpResponse response = new DefaultFullHttpResponse(
-                HttpVersion.HTTP_1_1, HttpResponseStatus.UNAUTHORIZED);
-            context.setResponse(response);
-            return;
-        }
+//        if (token == null || !isValidToken(token)) {
+//            // 认证失败，返回 401
+//            FullHttpResponse response = new DefaultFullHttpResponse(
+//                HttpVersion.HTTP_1_1, HttpResponseStatus.UNAUTHORIZED);
+//            context.setResponse(response);
+//            return;
+//        }
 
         // 认证通过，继续执行下一个过滤器
         chain.doFilter(context,index);

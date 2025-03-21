@@ -38,6 +38,10 @@ public class RouteTable {
                 Log.logger.info("符合转发标准，正在获取实例");
                 //获取到服务实例
                 List<Instance> instances = entry.getValue();
+                if (instances.isEmpty()) {
+                    Log.logger.info("不存在对应实例");
+                    return null;
+                }
                 //根据定义的负载均衡策略选择一个服务作为转发ip
                 Instance selectedInstance = loadServer.getLoadBalancerStrategy().selectInstance(instances);
                 //示例： http://localhost/xxxx/api -> http://instance/api

@@ -15,16 +15,16 @@ public class TokenBucket {
         this.availableTokens = new AtomicLong(capacity);
     }
 
-    public synchronized boolean tryAcquire(int tokens) {
+    public boolean tryAcquire(int tokens) {
         refill();
-        long currentAvailable = availableTokens.get();
-        while (currentAvailable >= tokens) {
-            if (availableTokens.compareAndSet(currentAvailable, currentAvailable - tokens)) {
-                return true;
+        long current;
+        do {
+            current = availableTokens.get();
+            if (current < tokens) {
+                return false;
             }
-            currentAvailable = availableTokens.get();
-        }
-        return false;
+        } while (!availableTokens.compareAndSet(current, current - tokens));
+        return true;
     }
 
     private void refill() {

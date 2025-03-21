@@ -13,6 +13,10 @@ public class NettyConfig {
     private int port;
     private int times;
     private int maxQps;
-    private int maxBurst;
-    private int tokenRefillRate;
+    private int serviceMaxBurst;
+    private int serviceTokenRefillRate;
+    private int userMaxBurst;
+    private int userTokenRefillRate;
+    private int noUserMaxBurst;
+    private int noUserTokenRefillRate;
 }

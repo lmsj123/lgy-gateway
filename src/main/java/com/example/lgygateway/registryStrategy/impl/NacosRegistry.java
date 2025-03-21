@@ -29,16 +29,19 @@ public class NacosRegistry implements Registry {
     private NacosConfig nacosConfig;
     // 已订阅的服务名集合（防止重复订阅）
     private final Set<String> subscribedServices = new HashSet<>();
+
     @Override
     public ConcurrentHashMap<String, List<Instance>> getRouteRules() {
         return routeRules;
     }
+
     //存储路由规则
     private final ConcurrentHashMap<String, List<Instance>> routeRules = new ConcurrentHashMap<>();
     //用来通过服务名获取集群
     private NamingService namingService;
     //用于监听路由规则的更新
     private ConfigService configService;
+
     @PostConstruct
     public void start() throws NacosException {
         if (nacosConfig.getDataId().isEmpty() || nacosConfig.getGroup().isEmpty()) {
@@ -64,6 +67,7 @@ public class NacosRegistry implements Registry {
             }
         });
     }
+
     public void updateRouteRules() {
         try {
             String dataId = nacosConfig.getDataId();
@@ -78,23 +82,25 @@ public class NacosRegistry implements Registry {
             e.fillInStackTrace();
         }
     }
+
     private void parseAndUpdateRouteRules(String content) {
         ObjectMapper objectMapper = new ObjectMapper();
         try {
-            Map<String, String> newRouteRules = objectMapper.readValue(content, new TypeReference<>() {});
+            Map<String, String> newRouteRules = objectMapper.readValue(content, new TypeReference<>() {
+            });
             Map<String, List<Instance>> rules = new HashMap<>();
 
             // 遍历所有路由规则中的服务名，注册实例变更监听
             newRouteRules.forEach((path, serviceName) -> {
                 try {
                     // 获取当前服务实例并存入路由表
-                    List<Instance> instances = namingService.getAllInstances(serviceName);
+                    List<Instance> instances = namingService.getAllInstances(serviceName, true);
                     if (!instances.isEmpty()) {
                         rules.put(path, instances);
                     }
                     // 注册服务实例变更监听器（核心新增代码）
                     if (!subscribedServices.contains(serviceName)) {
-                        namingService.subscribe(serviceName,new InstanceChangeListener(serviceName,path));
+                        namingService.subscribe(serviceName, new InstanceChangeListener(serviceName, path));
                         subscribedServices.add(serviceName);
                     }
                 } catch (NacosException e) {
@@ -109,6 +115,7 @@ public class NacosRegistry implements Registry {
             e.fillInStackTrace();
         }
     }
+
     private class InstanceChangeListener implements EventListener {
         private final String serviceName;
         private final String path;
@@ -122,13 +129,15 @@ public class NacosRegistry implements Registry {
         public void onEvent(Event event) {
             try {
                 // 获取最新实例列表并更新路由
-                List<Instance> newInstances = namingService.getAllInstances(serviceName);
+                // 只选择健康实例
+                List<Instance> newInstances = namingService.selectInstances(serviceName, true);
                 if (newInstances.isEmpty()) {
-                    Log.logger.info(path + "该路由相关信息已删除");
-                }else {
+                    routeRules.remove(path); // 彻底删除路由条目
+                    Log.logger.warn("路由[{}]所有实例已下线，路径已移除", path);
+                } else {
                     routeRules.put(path, newInstances);
+                    Log.logger.info("服务实例更新:{} -> {} , 当前服务实例个数为。{}", serviceName, newInstances, newInstances.size());
                 }
-                Log.logger.info("服务实例更新: " + serviceName + " -> " + newInstances);
             } catch (NacosException e) {
                 // 异常处理...
             }

@@ -277,6 +277,7 @@ public class AsyncNettyHttpServer {
                 ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE); // 立即关闭连接
                 return;
             }
+            logger.info("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
             // [2] 请求日志记录
             logger.info("接受到来自{}的请求", request.uri());
 

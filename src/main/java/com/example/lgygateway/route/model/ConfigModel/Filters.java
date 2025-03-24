@@ -1,4 +1,4 @@
-package com.example.lgygateway.route.model;
+package com.example.lgygateway.route.model.ConfigModel;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;

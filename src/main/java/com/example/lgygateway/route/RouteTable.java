@@ -1,12 +1,10 @@
 package com.example.lgygateway.route;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
-import com.example.lgygateway.filters.Filter;
 import com.example.lgygateway.filters.models.FilterChain;
 import com.example.lgygateway.filters.models.FullContext;
-import com.example.lgygateway.loadStrategy.LoadServer;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
-import com.example.lgygateway.route.model.RouteValue;
+import com.example.lgygateway.route.model.value.RouteValue;
 import com.example.lgygateway.utils.Log;
 import io.netty.handler.codec.http.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,8 +23,6 @@ public class RouteTable {
 
     @Autowired
     private RegistryFactory registryFactory;
-    @Autowired
-    private LoadServer loadServer;
 
     public FullHttpRequest matchRouteAsync(String url,FullHttpRequest request) throws URISyntaxException {
         Log.logger.info("正在获取路由表");
@@ -36,38 +32,42 @@ public class RouteTable {
         Log.logger.info("正在判断该请求是否符合转发标准 {}",url);
         for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
             //当查询到请求中符合网关转发规则
-            if (url.contains(entry.getKey()) && successFiltering(request,entry.getKey())) {
-                Log.logger.info("符合转发标准，正在获取实例");
-                //获取到服务实例
-                List<Instance> instances = entry.getValue();
-                if (instances.isEmpty()) {
-                    Log.logger.info("不存在对应实例");
+            if (url.contains(entry.getKey())) {
+                Log.logger.info("该路径 {} 存在于规则当中,正在判断是否符合其他条件",entry.getKey());
+                ConcurrentHashMap<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
+                if (successFiltering(request,entry.getKey(),routeValues)) {
+                    Log.logger.info("符合转发标准，正在获取实例");
+                    //获取到服务实例
+                    List<Instance> instances = entry.getValue();
+                    if (instances.isEmpty()) {
+                        Log.logger.info("不存在对应实例");
+                        return null;
+                    }
+                    //根据定义的负载均衡策略选择一个服务作为转发ip
+                    RouteValue routeValue = routeValues.get(entry.getKey());
+                    Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(instances);
+                    //示例： http://localhost/xxxx/api -> http://instance/api
+                    //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
+                    String backendPath = url.replace(entry.getKey(), "");
+                    String targetUrl = "http://" + selectedInstance.getIp() + ":" + selectedInstance.getPort() + "/" + backendPath;
+                    Log.logger.info("转发路径为 {}", targetUrl);
+                    //获取到对应的request准备发送
+                    return createProxyRequest(request, targetUrl);
+                }else {
+                    Log.logger.info("该请求不符合转发标准 {}",url);
                     return null;
                 }
-                //根据定义的负载均衡策略选择一个服务作为转发ip
-                Instance selectedInstance = loadServer.getLoadBalancerStrategy().selectInstance(instances);
-                //示例： http://localhost/xxxx/api -> http://instance/api
-                //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
-                String backendPath = url.replace(entry.getKey(), "");
-                String targetUrl = "http://" + selectedInstance.getIp() + ":" + selectedInstance.getPort() + "/" + backendPath;
-                Log.logger.info("转发路径为 {}",targetUrl);
-                //获取到对应的request准备发送
-                return createProxyRequest(request, targetUrl);
             }
         }
         Log.logger.info("该请求不符合转发标准 {}",url);
         return null;
     }
-    private boolean successFiltering(FullHttpRequest request, String key) {
-        ConcurrentHashMap<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
+    private boolean successFiltering(FullHttpRequest request, String key, ConcurrentHashMap<String, RouteValue> routeValues) {
         RouteValue routeValue = routeValues.get(key);
         if (routeValue.getMethod().equals("ALL") || routeValue.getMethod().equalsIgnoreCase(String.valueOf(request.method()))) {
             //这里需要做一个判断 若过滤器修改了请求（如修改Header）则需要更新
             //获取到过滤链
-            FilterChain filterChain = new FilterChain();
-            for (Filter filter : routeValue.getFilters()) {
-                filterChain.addFilter(filter);
-            }
+            FilterChain filterChain = routeValue.getFilterChain();
             //当过滤链中出现无法过滤时 对response添加相应内容 提示无法成功过滤
             FullContext fullContext = new FullContext();
             fullContext.setRequest(request);

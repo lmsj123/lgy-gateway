@@ -1,4 +1,4 @@
-package com.example.lgygateway.route.model;
+package com.example.lgygateway.route.model.ConfigModel;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
@@ -18,4 +18,7 @@ public class Route {
 
     @JsonProperty("filters")    // 嵌套列表
     private List<Filters> filters = new ArrayList<>();
+
+    @JsonProperty("LoadBalancer")
+    private String loadBalancer;
 }

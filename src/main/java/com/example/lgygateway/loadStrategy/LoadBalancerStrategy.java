@@ -4,6 +4,6 @@ import com.alibaba.nacos.api.naming.pojo.Instance;
 
 import java.util.List;
 
-public interface LoadBalancerStrategy {
+public interface LoadBalancerStrategy{
     Instance selectInstance(List<Instance> instances);
 }

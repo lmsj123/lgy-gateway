@@ -1,0 +1,3 @@
+com.example.lgygateway.filters.SPIFactory.impl.AuthFilterFactory
+com.example.lgygateway.filters.SPIFactory.impl.LoggingFilterFactory
+com.example.lgygateway.filters.SPIFactory.impl.RateLimitFilterFactory

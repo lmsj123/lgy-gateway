@@ -69,4 +69,6 @@ public class ConsistentHashLoadBalancer implements LoadBalancerStrategy {
         // 使用Guava MurmurHash32
         return Hashing.murmur3_32().hashUnencodedChars(key).asInt() & 0x7FFFFFFF;
     }
+
+
 }

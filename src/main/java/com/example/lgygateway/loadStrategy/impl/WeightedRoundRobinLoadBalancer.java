@@ -2,6 +2,7 @@ package com.example.lgygateway.loadStrategy.impl;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
+
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -45,4 +46,6 @@ public class WeightedRoundRobinLoadBalancer implements LoadBalancerStrategy {
     private int gcd(int a, int b) {
         return (b == 0) ? a : gcd(b, a % b);
     }
+
+
 }

@@ -9,11 +9,14 @@ import com.alibaba.nacos.api.naming.listener.Event;
 import com.alibaba.nacos.api.naming.listener.EventListener;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.NacosConfig;
-import com.example.lgygateway.filters.Filter;
+import com.example.lgygateway.filters.SPIFactory.SPIFilterFactory;
+import com.example.lgygateway.filters.models.FilterChain;
+import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
+import com.example.lgygateway.loadStrategy.SPIFactory.SPILoadStrategyFactory;
 import com.example.lgygateway.registryStrategy.Registry;
-import com.example.lgygateway.route.model.Filters;
-import com.example.lgygateway.route.model.Route;
-import com.example.lgygateway.route.model.RouteValue;
+import com.example.lgygateway.route.model.ConfigModel.Filters;
+import com.example.lgygateway.route.model.ConfigModel.Route;
+import com.example.lgygateway.route.model.value.RouteValue;
 import com.example.lgygateway.utils.Log;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -48,6 +51,7 @@ public class NacosRegistry implements Registry, DisposableBean {
     //用于监听路由规则的更新
     private ConfigService configService;
     private final static ReentrantLock lock = new ReentrantLock();
+
     @PostConstruct
     public void start() throws NacosException {
         if (nacosConfig.getDataId().isEmpty() || nacosConfig.getGroup().isEmpty()) {
@@ -91,8 +95,9 @@ public class NacosRegistry implements Registry, DisposableBean {
 
     private final static String LB_PREFIX = "lb://";
     private final static ExecutorService customExecutor = Executors.newFixedThreadPool(20);
+
     private void parseAndUpdateRouteRules(String content) {
-        try{
+        try {
             //当配置文件经常修改 通过lock保证线程安全
             lock.lock();
             routeValues.clear();
@@ -126,18 +131,22 @@ public class NacosRegistry implements Registry, DisposableBean {
                             if (!allInstances.isEmpty()) {
                                 rules.put(path, allInstances);
                             }
-
+                            // 路由属性
                             RouteValue routeValue = new RouteValue();
 
                             // 匹配过滤器
                             List<String> filterNames = route.getFilters().stream()
                                     .map(Filters::getName)
                                     .collect(Collectors.toList());
-                            List<Filter> filters = getMatchedFilters(filterNames);
+                            FilterChain filterChain = getMatchedFilters(filterNames);
+
+                            // 匹配负载均衡策略
+                            LoadBalancerStrategy loadBalancerStrategy = getMatchedLoadBalancer(route.getLoadBalancer());
 
                             // 添加路由属性
-                            routeValue.setFilters(filters);
+                            routeValue.setFilterChain(filterChain);
                             routeValue.setMethod(route.getPredicates().getMethod());
+                            routeValue.setLoadBalancerStrategy(loadBalancerStrategy);
                             routeValues.put(path, routeValue);
 
                             //订阅相关服务
@@ -148,7 +157,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                         } catch (NacosException e) {
                             throw new RuntimeException("无法获取服务实例: " + serviceName, e);
                         }
-                    },customExecutor);
+                    }, customExecutor);
                     futures.add(future);
                 });
                 // 等待所有任务完成
@@ -159,24 +168,51 @@ public class NacosRegistry implements Registry, DisposableBean {
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
-        }finally {
+        } finally {
             lock.unlock();
         }
     }
+
+    // 预先加载所有 LoadServer 实现
+    private static final List<SPILoadStrategyFactory> ALL_LOADBALANCERS = loadAllLoadBalancers();
+
+    private static List<SPILoadStrategyFactory> loadAllLoadBalancers() {
+        ServiceLoader<SPILoadStrategyFactory> load = ServiceLoader.load(SPILoadStrategyFactory.class);
+        ArrayList<SPILoadStrategyFactory> spiLoadStrategyFactories = new ArrayList<>();
+        load.forEach(spiLoadStrategyFactories::add);
+        return Collections.unmodifiableList(spiLoadStrategyFactories);
+    }
+
+    private LoadBalancerStrategy getMatchedLoadBalancer(String loadBalancer) {
+        List<SPILoadStrategyFactory> list = ALL_LOADBALANCERS.stream()
+                .filter(loadBalancerStrategy
+                        -> loadBalancerStrategy.getType().equalsIgnoreCase(loadBalancer)).toList();
+        if (list.isEmpty()) {
+            return null;
+        }
+        return list.get(0).create();
+    }
+
     // 预先加载所有 Filter 实现
-    private static final List<Filter> ALL_FILTERS = loadAllFilters();
-    private static List<Filter> loadAllFilters() {
-        ServiceLoader<Filter> loader = ServiceLoader.load(Filter.class);
-        List<Filter> filters = new ArrayList<>();
-        loader.forEach(filters::add);
-        return Collections.unmodifiableList(filters);
+    private static final List<SPIFilterFactory> ALL_FILTERS = loadAllFilters();
+
+    private static List<SPIFilterFactory> loadAllFilters() {
+        ServiceLoader<SPIFilterFactory> loader = ServiceLoader.load(SPIFilterFactory.class);
+        List<SPIFilterFactory> spiFilterFactories = new ArrayList<>();
+        loader.forEach(spiFilterFactories::add);
+        return Collections.unmodifiableList(spiFilterFactories);
     }
-    // 修改过滤器匹配逻辑
-    private List<Filter> getMatchedFilters(List<String> filterNames) {
-        return ALL_FILTERS.stream()
-                .filter(filter -> filterNames.contains(filter.getClass().getSimpleName()))
-                .collect(Collectors.toList());
+
+    private FilterChain getMatchedFilters(List<String> filterNames) {
+        List<SPIFilterFactory> filterFactories = ALL_FILTERS.stream()
+                .filter(filter -> filterNames.contains(filter.getType()))
+                .toList();
+        FilterChain filterChain = new FilterChain();
+        filterFactories.forEach(f -> filterChain.addFilter(f.create()));
+        return filterChain;
     }
+
+    // 服务相关的监听器
     private class InstanceChangeListener implements EventListener {
         private final String serviceName;
         private final String path;
@@ -194,6 +230,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                 List<Instance> newInstances = namingService.selectInstances(serviceName, true);
                 if (newInstances.isEmpty()) {
                     routeRules.remove(path); // 彻底删除路由条目
+                    routeValues.remove(path);// 彻底删除路由属性
                     Log.logger.warn("路由[{}]所有实例已下线，路径已移除", path);
                 } else {
                     routeRules.put(path, newInstances);
@@ -204,9 +241,10 @@ public class NacosRegistry implements Registry, DisposableBean {
             }
         }
     }
+
     @Override
     public void destroy() {
-        if (customExecutor != null && !customExecutor.isShutdown()) {
+        if (!customExecutor.isShutdown()) {
             customExecutor.shutdown();
             try {
                 if (!customExecutor.awaitTermination(10, TimeUnit.SECONDS)) {

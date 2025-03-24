@@ -18,4 +18,6 @@ public class RandomLoadBalancer implements LoadBalancerStrategy {
         int index = random.nextInt(instances.size());
         return instances.get(index);
     }
+
+
 }

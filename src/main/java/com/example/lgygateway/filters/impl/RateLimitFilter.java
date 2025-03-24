@@ -14,14 +14,6 @@ public class RateLimitFilter implements Filter {
 
     @Override
     public void filter(FullContext context, FilterChain chain,int index) {
-        if (!rateLimiter.tryAcquire()) {
-            // 限流，返回 429
-            FullHttpResponse response = new DefaultFullHttpResponse(
-                HttpVersion.HTTP_1_1, HttpResponseStatus.TOO_MANY_REQUESTS);
-            context.setResponse(response);
-            return;
-        }
-
         // 通过限流，继续执行下一个过滤器
         chain.doFilter(context,index);
     }

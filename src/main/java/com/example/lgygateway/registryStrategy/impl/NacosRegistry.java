@@ -9,36 +9,45 @@ import com.alibaba.nacos.api.naming.listener.Event;
 import com.alibaba.nacos.api.naming.listener.EventListener;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.NacosConfig;
+import com.example.lgygateway.filters.Filter;
 import com.example.lgygateway.registryStrategy.Registry;
+import com.example.lgygateway.route.model.Filters;
+import com.example.lgygateway.route.model.Route;
+import com.example.lgygateway.route.model.RouteValue;
 import com.example.lgygateway.utils.Log;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import jakarta.annotation.PostConstruct;
+import lombok.Getter;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 @Component("nacos")
 @Lazy
-public class NacosRegistry implements Registry {
+public class NacosRegistry implements Registry, DisposableBean {
     @Autowired
     private NacosConfig nacosConfig;
     // 已订阅的服务名集合（防止重复订阅）
-    private final Set<String> subscribedServices = new HashSet<>();
-    @Override
-    public ConcurrentHashMap<String, List<Instance>> getRouteRules() {
-        return routeRules;
-    }
+    private final Set<String> subscribedServices = ConcurrentHashMap.newKeySet();
     //存储路由规则
+    @Getter
     private final ConcurrentHashMap<String, List<Instance>> routeRules = new ConcurrentHashMap<>();
+    //存储路由属性
+    @Getter
+    private final ConcurrentHashMap<String, RouteValue> routeValues = new ConcurrentHashMap<>();
     //用来通过服务名获取集群
     private NamingService namingService;
     //用于监听路由规则的更新
     private ConfigService configService;
+    private final static ReentrantLock lock = new ReentrantLock();
     @PostConstruct
     public void start() throws NacosException {
         if (nacosConfig.getDataId().isEmpty() || nacosConfig.getGroup().isEmpty()) {
@@ -64,6 +73,7 @@ public class NacosRegistry implements Registry {
             }
         });
     }
+
     public void updateRouteRules() {
         try {
             String dataId = nacosConfig.getDataId();
@@ -78,36 +88,94 @@ public class NacosRegistry implements Registry {
             e.fillInStackTrace();
         }
     }
+
+    private final static String LB_PREFIX = "lb://";
+    private final static ExecutorService customExecutor = Executors.newFixedThreadPool(20);
     private void parseAndUpdateRouteRules(String content) {
-        ObjectMapper objectMapper = new ObjectMapper();
-        try {
-            Map<String, String> newRouteRules = objectMapper.readValue(content, new TypeReference<>() {});
-            Map<String, List<Instance>> rules = new HashMap<>();
+        try{
+            //当配置文件经常修改 通过lock保证线程安全
+            lock.lock();
+            routeValues.clear();
+            try {
+                // 得到相关的实例ip
+                ConcurrentHashMap<String, List<Instance>> rules = new ConcurrentHashMap<>();
+                // 使用SnakeYAML解析原始YAML内容
+                ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+                // 直接解析整个 YAML 结构到 Map，提取 routes 列表
+                Map<String, Object> root = yamlMapper.readValue(content, new TypeReference<>() {
+                });
+                List<Map<String, Object>> routesList = (List<Map<String, Object>>) root.get("routes");
+                // 将 List<Map> 转换为 List<Route>
+                List<Route> routes = yamlMapper.convertValue(routesList, new TypeReference<>() {
+                });
+                // 启用多线程优化性能
+                List<CompletableFuture<Void>> futures = new ArrayList<>();
+                routes.forEach(route -> {
+                    CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                        // 获取服务名
+                        // lb:xxxxService -> xxxxService
+                        String path = route.getPredicates().getPath();
+                        String uri = route.getUri();
+                        String serviceName = "";
+                        if (uri != null && uri.startsWith(LB_PREFIX)) {
+                            serviceName = uri.substring(LB_PREFIX.length());
+                        }
+                        try {
+                            // 获取服务实例
+                            List<Instance> allInstances = namingService.getAllInstances(serviceName);
+                            if (!allInstances.isEmpty()) {
+                                rules.put(path, allInstances);
+                            }
 
-            // 遍历所有路由规则中的服务名，注册实例变更监听
-            newRouteRules.forEach((path, serviceName) -> {
-                try {
-                    // 获取当前服务实例并存入路由表
-                    List<Instance> instances = namingService.getAllInstances(serviceName,true);
-                    if (!instances.isEmpty()) {
-                        rules.put(path, instances);
-                    }
-                    // 注册服务实例变更监听器（核心新增代码）
-                    if (!subscribedServices.contains(serviceName)) {
-                        namingService.subscribe(serviceName,new InstanceChangeListener(serviceName,path));
-                        subscribedServices.add(serviceName);
-                    }
-                } catch (NacosException e) {
-                    throw new RuntimeException("无法获取服务实例: " + serviceName, e);
-                }
-            });
+                            RouteValue routeValue = new RouteValue();
 
-            // 清空旧路由规则并更新
-            routeRules.clear();
-            routeRules.putAll(rules);
-        } catch (Exception e) {
-            e.fillInStackTrace();
+                            // 匹配过滤器
+                            List<String> filterNames = route.getFilters().stream()
+                                    .map(Filters::getName)
+                                    .collect(Collectors.toList());
+                            List<Filter> filters = getMatchedFilters(filterNames);
+
+                            // 添加路由属性
+                            routeValue.setFilters(filters);
+                            routeValue.setMethod(route.getPredicates().getMethod());
+                            routeValues.put(path, routeValue);
+
+                            //订阅相关服务
+                            if (!subscribedServices.contains(serviceName)) {
+                                namingService.subscribe(serviceName, new InstanceChangeListener(serviceName, path));
+                                subscribedServices.add(serviceName);
+                            }
+                        } catch (NacosException e) {
+                            throw new RuntimeException("无法获取服务实例: " + serviceName, e);
+                        }
+                    },customExecutor);
+                    futures.add(future);
+                });
+                // 等待所有任务完成
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                // 清空旧路由规则并更新
+                routeRules.clear();
+                routeRules.putAll(rules);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }finally {
+            lock.unlock();
         }
+    }
+    // 预先加载所有 Filter 实现
+    private static final List<Filter> ALL_FILTERS = loadAllFilters();
+    private static List<Filter> loadAllFilters() {
+        ServiceLoader<Filter> loader = ServiceLoader.load(Filter.class);
+        List<Filter> filters = new ArrayList<>();
+        loader.forEach(filters::add);
+        return Collections.unmodifiableList(filters);
+    }
+    // 修改过滤器匹配逻辑
+    private List<Filter> getMatchedFilters(List<String> filterNames) {
+        return ALL_FILTERS.stream()
+                .filter(filter -> filterNames.contains(filter.getClass().getSimpleName()))
+                .collect(Collectors.toList());
     }
     private class InstanceChangeListener implements EventListener {
         private final String serviceName;
@@ -129,10 +197,23 @@ public class NacosRegistry implements Registry {
                     Log.logger.warn("路由[{}]所有实例已下线，路径已移除", path);
                 } else {
                     routeRules.put(path, newInstances);
-                    Log.logger.info("服务实例更新:{} -> {} , 当前服务实例个数为。{}", serviceName ,newInstances,newInstances.size() );
+                    Log.logger.info("服务实例更新:{} -> {} , 当前服务实例个数为。{}", serviceName, newInstances, newInstances.size());
                 }
             } catch (NacosException e) {
                 // 异常处理...
+            }
+        }
+    }
+    @Override
+    public void destroy() {
+        if (customExecutor != null && !customExecutor.isShutdown()) {
+            customExecutor.shutdown();
+            try {
+                if (!customExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    customExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
     }

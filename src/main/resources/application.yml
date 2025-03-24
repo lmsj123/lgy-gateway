@@ -8,8 +8,8 @@ registration:
 nacos:
   ip: 127.0.0.1
   port: 8848
-  dataId: 1
-  group: route
+  dataId: 2
+  group: route2
 
 #此为zookeeper路由配置的相关属性
 zookeeper:

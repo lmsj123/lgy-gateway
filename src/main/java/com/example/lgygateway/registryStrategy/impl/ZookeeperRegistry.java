@@ -3,6 +3,7 @@ package com.example.lgygateway.registryStrategy.impl;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.ZookeeperConfig;
 import com.example.lgygateway.registryStrategy.Registry;
+import com.example.lgygateway.route.model.RouteValue;
 import org.apache.zookeeper.ZooKeeper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -29,6 +30,11 @@ public class ZookeeperRegistry implements Registry {
 
     @Override
     public ConcurrentHashMap<String, List<Instance>> getRouteRules() {
+        return null;
+    }
+
+    @Override
+    public ConcurrentHashMap<String, RouteValue> getRouteValues() {
         return null;
     }
 }

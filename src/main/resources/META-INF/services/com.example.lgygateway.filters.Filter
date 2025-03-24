@@ -1,1 +1,2 @@
 com.example.lgygateway.filters.impl.AuthFilter
+com.example.lgygateway.filters.impl.RateLimitFilter

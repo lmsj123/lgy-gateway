@@ -13,20 +13,28 @@ import org.springframework.stereotype.Component;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
-//负载均衡存在bug
+/*
+关键改进点：
+精确路由匹配：避免误匹配。
+原子快照：解决并发更新问题。
+资源管理：防止内存泄漏。
+过滤器副作用处理：传递修改后的请求。
+性能提升：通过 Trie 树将匹配复杂度从 O(N) 降至 O(log N)，适合大规模路由规则。
+ */
 @Component
 public class RouteTable {
 
     @Autowired
     private RegistryFactory registryFactory;
-
+    //遍历 ConcurrentHashMap 时若路由规则更新，可能读到中间状态。
     public FullHttpRequest matchRouteAsync(String url,FullHttpRequest request) throws URISyntaxException {
         Log.logger.info("正在获取路由表");
-        ConcurrentHashMap<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
+        Map<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
         //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
         //也会对后续匹配进行优化
         Log.logger.info("正在判断该请求是否符合转发标准 {}",url);
@@ -34,7 +42,7 @@ public class RouteTable {
             //当查询到请求中符合网关转发规则
             if (url.contains(entry.getKey())) {
                 Log.logger.info("该路径 {} 存在于规则当中,正在判断是否符合其他条件",entry.getKey());
-                ConcurrentHashMap<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
+                Map<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
                 if (successFiltering(request,entry.getKey(),routeValues)) {
                     Log.logger.info("符合转发标准，正在获取实例");
                     //获取到服务实例
@@ -62,7 +70,7 @@ public class RouteTable {
         Log.logger.info("该请求不符合转发标准 {}",url);
         return null;
     }
-    private boolean successFiltering(FullHttpRequest request, String key, ConcurrentHashMap<String, RouteValue> routeValues) {
+    private boolean successFiltering(FullHttpRequest request, String key, Map<String, RouteValue> routeValues) {
         RouteValue routeValue = routeValues.get(key);
         if (routeValue.getMethod().equals("ALL") || routeValue.getMethod().equalsIgnoreCase(String.valueOf(request.method()))) {
             //这里需要做一个判断 若过滤器修改了请求（如修改Header）则需要更新

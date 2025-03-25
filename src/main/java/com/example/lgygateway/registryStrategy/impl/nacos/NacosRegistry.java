@@ -1,4 +1,4 @@
-package com.example.lgygateway.registryStrategy.impl;
+package com.example.lgygateway.registryStrategy.impl.nacos;
 
 import cn.hutool.core.thread.NamedThreadFactory;
 import com.alibaba.nacos.api.NacosFactory;
@@ -34,24 +34,13 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
-/*
-推荐改进优先级：
-线程池管理（避免任务堆积）
-SPI加载缓存（提升性能）
-增量更新（减少全量解析开销）
- */
-//TODO 下午任务 添加RouteData 重构类 调研如何增量更新
+
 @Component("nacos")
 @Lazy
 public class NacosRegistry implements Registry, DisposableBean {
-    static class RouteData{
-        final Map<String, List<Instance>> rules;
-        final Map<String, RouteValue> values;
-        public RouteData(Map<String, List<Instance>> rules, Map<String, RouteValue> values) {
-            this.rules = rules;
-            this.values = values;
-        }
+    record RouteData(Map<String, List<Instance>> rules, Map<String, RouteValue> values) {
     }
+
     // 存储路由
     // 使用原子引用+副本策略保证路由更新原子性
     private final AtomicReference<RouteData> routeDataRef =
@@ -60,31 +49,54 @@ public class NacosRegistry implements Registry, DisposableBean {
     public Map<String, List<Instance>> getRouteRules() {
         return Collections.unmodifiableMap(routeDataRef.get().rules);
     }
+
     public Map<String, RouteValue> getRouteValues() {
         return Collections.unmodifiableMap(routeDataRef.get().values);
     }
+
     @Autowired
     private NacosConfig nacosConfig;
     // 已订阅的服务名集合（防止重复订阅）
     private final ConcurrentHashMap<String, InstanceChangeListener> subscribedServices = new ConcurrentHashMap<>();
+    // 已存在的路由 用于判断是否增量或者全量更新
+    private final ConcurrentHashMap<String, Route> existingRoutes = new ConcurrentHashMap<>();
+    // 已存在的映射服务数量 用于判断在删除一个path之后是否还存在其他路径映射
+    private final ConcurrentHashMap<String, Integer> servicesCount = new ConcurrentHashMap<>();
     //用来通过服务名获取集群
     private NamingService namingService;
     //用于监听路由规则的更新
     private ConfigService configService;
     private final static ReentrantLock lock = new ReentrantLock();
+    private final static String LB_PREFIX = "lb://";
+    // 优化线程池配置（根据CPU核数动态调整）
+    // 但此处需要小心 由于真正部署环境下cpu数量会较高 这会导致多个线程的上下文频繁切换 所以还是根据实际情况判断
+    private static final int CPU_CORES = Runtime.getRuntime().availableProcessors();
+    private static final ExecutorService customExecutor = new ThreadPoolExecutor(
+            CPU_CORES * 2,       // corePoolSize
+            CPU_CORES * 4,       // maximumPoolSize
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(500), // 有界队列
+            new NamedThreadFactory("Route-Update", true),
+            new ThreadPoolExecutor.AbortPolicy() {
+                public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+                    Log.logger.error("Task rejected, queue full! PoolSize:{}", e.getPoolSize());
+                    super.rejectedExecution(r, e);
+                }
+            });
 
     @PostConstruct
     public void start() throws NacosException {
-        if (nacosConfig.getDataId().isEmpty() || nacosConfig.getGroup().isEmpty()) {
+        if (checkNacosConfig(nacosConfig.getDataId(), nacosConfig.getGroup())) {
             throw new NacosException(NacosException.NOT_FOUND, "无法找到路由配置的地址");
         }
-        if (nacosConfig.getIp().isEmpty() || nacosConfig.getPort().isEmpty()) {
+        if (checkNacosAddress(nacosConfig.getIp(), nacosConfig.getPort())) {
             throw new NacosException(NacosException.NOT_FOUND, "无法找到nacos的地址");
         }
         //功能为：通过服务名拿到对应的示例
         namingService = NacosFactory.createNamingService(nacosConfig.getIp() + ":" + nacosConfig.getPort());
         configService = NacosFactory.createConfigService(nacosConfig.getIp() + ":" + nacosConfig.getPort());
         Log.logger.info("准备开始加载路由规则和属性");
+        // 执行加载路由规则
         CompletableFuture.runAsync(this::updateRouteRules);
         //后续监听路由规则是否更改
         configService.addListener(nacosConfig.getDataId(), nacosConfig.getGroup(), new Listener() {
@@ -102,12 +114,10 @@ public class NacosRegistry implements Registry, DisposableBean {
 
     public void updateRouteRules() {
         try {
-            String dataId = nacosConfig.getDataId();
-            String group = nacosConfig.getGroup();
-            if (dataId.isEmpty() || group.isEmpty()) {
-                throw new NacosException(NacosException.NOT_FOUND, "无法找到路由配置的地址");
+            String content = configService.getConfig(nacosConfig.getDataId(), nacosConfig.getGroup(), 5000);
+            if (content.isEmpty()) {
+                throw new NacosException(404, "相关路由配置不存在");
             }
-            String content = configService.getConfig(dataId, group, 5000);
             //更新相关路由
             parseAndUpdateRouteRules(content);
         } catch (NacosException e) {
@@ -115,44 +125,35 @@ public class NacosRegistry implements Registry, DisposableBean {
         }
     }
 
-    private final static String LB_PREFIX = "lb://";
-    // 优化线程池配置（根据CPU核数动态调整）
-    // 但此处需要小心 由于真正部署环境下cpu数量会较高 这会导致多个线程的上下文频繁切换 所以还是根据实际情况判断
-    private static final int CPU_CORES = Runtime.getRuntime().availableProcessors();
-    private static final ExecutorService customExecutor = new ThreadPoolExecutor(
-            CPU_CORES * 2,       // corePoolSize
-            CPU_CORES * 4,       // maximumPoolSize
-            60L, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<>(500), // 有界队列
-            new NamedThreadFactory("Route-Update",true),
-            new ThreadPoolExecutor.AbortPolicy() {
-                public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
-                    Log.logger.error("Task rejected, queue full! PoolSize:{}", e.getPoolSize());
-                    super.rejectedExecution(r, e);
-                }
-            });
-
-    //TODO 这里存在一个缺陷 现在的path都为/xxxx/这样的格式
-    //TODO 后续可以更新为/xxxx/*表示当/xxxx后面只剩一个路径才可转发 /xxxx/**表示存在/xxxx/后即可转发
-    //TODO 每个path都是独一无二隔离开的 所以不会出现多个线程执行同一个oath
+    //TODO 动态线程池调参：根据任务负载动态调整核心线程数（参考setCorePoolSize）
+    //      路由增量更新：记录已变更的路由路径，仅更新差异部分。
+    //需要注意的是 这里监听的是配置文件 在我们正常开发当中 频繁多个线程修改配置文件的场景基本不存在
+    //但如果后续出现了这样的场景 需要对lock锁进行优化
     private void parseAndUpdateRouteRules(String content) {
-            //当配置文件经常修改 通过lock保证线程安全
-            try {
-                lock.lock();
-                // 得到相关的实例ip
-                ConcurrentHashMap<String, List<Instance>> rules = new ConcurrentHashMap<>();
-                ConcurrentHashMap<String, RouteValue> values = new ConcurrentHashMap<>();
-                // 使用SnakeYAML解析原始YAML内容
-                ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
-                // 直接解析整个 YAML 结构到 Map，提取 routes 列表
-                Yaml yaml = new Yaml();
-                Map<String, Object> root = yaml.load(content);
-                List<Map<String, Object>> routesList = (List<Map<String, Object>>) root.get("routes");
-                // 将 List<Map> 转换为 List<Route>
-                List<Route> routes = yamlMapper.convertValue(routesList, new TypeReference<>() {});
-                // 启用多线程优化性能
-                List<CompletableFuture<Void>> futures = new ArrayList<>();
-                routes.forEach(route -> {
+        //当配置文件经常修改 通过lock保证线程安全
+        try {
+            lock.lock();
+            ConcurrentHashMap<String, List<Instance>> rules = new ConcurrentHashMap<>();
+            ConcurrentHashMap<String, RouteValue> values = new ConcurrentHashMap<>();
+            List<Route> routes = analysisYaml(content);
+            // 构建新旧路由标识映射
+            Set<String> newRouteIds = routes.stream().parallel()
+                    .map(Route::getId)
+                    .collect(Collectors.toSet());
+
+            // 检测被删除的路由
+            Set<String> deletedRoutes = existingRoutes.keySet().stream().parallel()
+                    .filter(id -> !newRouteIds.contains(id))
+                    .collect(Collectors.toSet());
+
+            // 处理删除的路由
+            processDeletedRoutes(deletedRoutes);
+
+            // 启用多线程优化性能
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            routes.forEach(route -> {
+                if (checkRouteUpdate(route)) {
+                    existingRoutes.put(route.getId(), route);
                     CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                         // 获取服务名
                         // lb:xxxxService -> xxxxService
@@ -184,7 +185,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                             routeValue.setFilterChain(filterChain);
                             routeValue.setMethod(route.getPredicates().getMethod());
                             routeValue.setLoadBalancerStrategy(loadBalancerStrategy);
-                            //可能会存在覆盖问题
+
                             values.put(path, routeValue);
 
                             //订阅相关服务
@@ -193,44 +194,90 @@ public class NacosRegistry implements Registry, DisposableBean {
                                 try {
                                     InstanceChangeListener instanceChangeListener = new InstanceChangeListener(k, path);
                                     namingService.subscribe(k, instanceChangeListener);
+                                    // 使用merge方法实现原子计数
+                                    servicesCount.merge(k, 1, Integer::sum);
                                     return instanceChangeListener;
                                 } catch (NacosException e) {
-                                    throw new RuntimeException("Subscribe failed: " + k, e);
+                                    Log.logger.error("订阅失败: {}", k, e);
+                                    throw new CompletionException(e); // 抛出异常终止任务
                                 }
-
                             });
                         } catch (NacosException e) {
                             throw new RuntimeException("无法获取服务实例: " + serviceName, e);
                         }
                     }, customExecutor);
                     futures.add(future);
-                });
-                // 等待所有任务完成
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-                // 清空旧路由规则并更新
-                //TODO
-                routeDataRef.set(new RouteData(rules, values));
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }finally {
-                lock.unlock();
-            }
+                }
+            });
+            // 等待所有任务完成
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            // 清空旧路由规则并更新
+            routeDataRef.getAndUpdate(current -> {
+                Map<String, List<Instance>> mergedRules = new HashMap<>(current.rules);
+                Map<String, RouteValue> mergedValues = new HashMap<>(current.values);
+
+                // 仅更新发生变化的部分
+                mergedRules.putAll(rules);
+                mergedValues.putAll(values);
+
+                return new RouteData(mergedRules, mergedValues);
+            });
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    /*
-    问题描述
-       使用静态变量ALL_LOADBALANCERS和ALL_FILTERS预先加载SPI实现，导致运行时新增的SPI插件（如新负载均衡策略）无法被检测到。
-    风险与影响
-       需重启服务才能加载新插件，降低系统灵活性。
-       不符合微服务动态扩展需求。
-    优化建议
-       动态加载SPI：每次调用getMatchedLoadBalancer或getMatchedFilters时通过ServiceLoader重新加载
-       添加缓存机制，避免频繁加载影响性能。
-     */
+    // 处理删除的路由
+    private void processDeletedRoutes(Set<String> deletedRoutes) {
+        deletedRoutes.forEach(routeId -> {
+            Route removedRoute = existingRoutes.remove(routeId);
+            String path = removedRoute.getPredicates().getPath();
 
-    // 预先加载所有 LoadServer 实现
-    private static final List<SPILoadStrategyFactory> ALL_LOADBALANCERS = loadAllLoadBalancers();
+            // 从路由数据中移除
+            routeDataRef.getAndUpdate(current -> {
+                Map<String, List<Instance>> newRules = new HashMap<>(current.rules);
+                Map<String, RouteValue> newValues = new HashMap<>(current.values);
+                newRules.remove(path);
+                newValues.remove(path);
+                return new RouteData(newRules, newValues);
+            });
 
+            // 清理订阅关系 可能存在不同路径指向同一个服务 所以要判断服务数量
+            try {
+                cleanupSubscription(removedRoute);
+            } catch (NacosException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    // 清理订阅关系
+    // 由于在lock所机制的干预下无需担心线程不安全问题
+    private void cleanupSubscription(Route removedRoute) throws NacosException {
+        String serviceName = removedRoute.getUri().substring(LB_PREFIX.length());
+        Integer count = servicesCount.get(serviceName);
+        if (count == 1) {
+            servicesCount.remove(serviceName);
+            InstanceChangeListener remove = subscribedServices.remove(serviceName);
+            namingService.unsubscribe(serviceName, remove);
+        } else {
+            servicesCount.put(serviceName, count - 1);
+        }
+    }
+
+    // 判断是否需要更新该路由
+    private boolean checkRouteUpdate(Route route) {
+        if (!existingRoutes.containsKey(route.getId())) {
+            return true;
+        }
+        Route oldRoute = existingRoutes.get(route.getId());
+        return !route.equals(oldRoute);
+    }
+    //TODO 后续添加缓存机制
+
+    //预先加载所有 LoadServer 实现
     private static List<SPILoadStrategyFactory> loadAllLoadBalancers() {
         ServiceLoader<SPILoadStrategyFactory> load = ServiceLoader.load(SPILoadStrategyFactory.class);
         ArrayList<SPILoadStrategyFactory> spiLoadStrategyFactories = new ArrayList<>();
@@ -239,7 +286,7 @@ public class NacosRegistry implements Registry, DisposableBean {
     }
 
     private LoadBalancerStrategy getMatchedLoadBalancer(String loadBalancer) {
-        List<SPILoadStrategyFactory> list = ALL_LOADBALANCERS.stream()
+        List<SPILoadStrategyFactory> list = loadAllLoadBalancers().stream()
                 .filter(loadBalancerStrategy
                         -> loadBalancerStrategy.getType().equalsIgnoreCase(loadBalancer)).toList();
         if (list.isEmpty()) {
@@ -249,8 +296,6 @@ public class NacosRegistry implements Registry, DisposableBean {
     }
 
     // 预先加载所有 Filter 实现
-    private static final List<SPIFilterFactory> ALL_FILTERS = loadAllFilters();
-
     private static List<SPIFilterFactory> loadAllFilters() {
         ServiceLoader<SPIFilterFactory> loader = ServiceLoader.load(SPIFilterFactory.class);
         List<SPIFilterFactory> spiFilterFactories = new ArrayList<>();
@@ -259,7 +304,7 @@ public class NacosRegistry implements Registry, DisposableBean {
     }
 
     private FilterChain getMatchedFilters(List<String> filterNames) {
-        List<SPIFilterFactory> filterFactories = ALL_FILTERS.stream()
+        List<SPIFilterFactory> filterFactories = loadAllFilters().stream()
                 .filter(filter -> filterNames.contains(filter.getType()))
                 .toList();
         FilterChain filterChain = new FilterChain();
@@ -295,7 +340,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                     routeDataRef.getAndUpdate(current -> {
                         ConcurrentHashMap<String, List<Instance>> newRules = new ConcurrentHashMap<>(current.rules);
                         ConcurrentHashMap<String, RouteValue> newValues = new ConcurrentHashMap<>(current.values);
-                        newRules.put(path,newInstances);
+                        newRules.put(path, newInstances);
                         return new RouteData(newRules, newValues);
                     });
                     Log.logger.info("服务实例更新:{} -> {} , 当前服务实例个数为。{}", serviceName, newInstances, newInstances.size());
@@ -304,6 +349,30 @@ public class NacosRegistry implements Registry, DisposableBean {
                 // 异常处理...
             }
         }
+
+    }
+
+    // 校验nacos路由文件是否配置
+    public boolean checkNacosConfig(String dataId, String group) {
+        return dataId.isEmpty() || group.isEmpty();
+    }
+
+    // 校验nacos ip文件是否配置
+    public boolean checkNacosAddress(String ip, String port) {
+        return ip.isEmpty() || port.isEmpty();
+    }
+
+    // 解析yaml配置文件
+    public List<Route> analysisYaml(String content) {
+        // 使用SnakeYAML解析原始YAML内容
+        ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+        // 直接解析整个 YAML 结构到 Map，提取 routes 列表
+        Yaml yaml = new Yaml();
+        Map<String, Object> root = yaml.load(content);
+        List<Map<String, Object>> routesList = (List<Map<String, Object>>) root.get("routes");
+        // 将 List<Map> 转换为 List<Route>
+        return yamlMapper.convertValue(routesList, new TypeReference<>() {
+        });
     }
 
     @Override
@@ -322,7 +391,7 @@ public class NacosRegistry implements Registry, DisposableBean {
             try {
                 namingService.unsubscribe(service, listener);
             } catch (NacosException e) {
-                throw new RuntimeException(e);
+                Log.logger.warn("Unsubscribe failed for service: {}", service, e);
             }
         });
         // 改进线程池关闭逻辑

@@ -1,7 +1,7 @@
 package com.example.lgygateway.config;
 
-import com.example.lgygateway.registryStrategy.impl.NacosRegistry;
-import com.example.lgygateway.registryStrategy.impl.ZookeeperRegistry;
+import com.example.lgygateway.registryStrategy.impl.nacos.NacosRegistry;
+import com.example.lgygateway.registryStrategy.impl.zookeeper.ZookeeperRegistry;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

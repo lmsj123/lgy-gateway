@@ -1,4 +1,4 @@
-package com.example.lgygateway.registryStrategy.impl;
+package com.example.lgygateway.registryStrategy.impl.zookeeper;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.ZookeeperConfig;

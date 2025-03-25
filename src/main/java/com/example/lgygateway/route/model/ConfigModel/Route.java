@@ -2,11 +2,13 @@ package com.example.lgygateway.route.model.ConfigModel;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 
 import java.util.ArrayList;
 import java.util.List;
 
 @Data
+@EqualsAndHashCode
 public class Route {
     private String id;
 

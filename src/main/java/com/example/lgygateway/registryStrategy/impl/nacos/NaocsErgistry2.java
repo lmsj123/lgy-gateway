@@ -1,4 +1,4 @@
-package com.example.lgygateway.registryStrategy.impl;
+package com.example.lgygateway.registryStrategy.impl.nacos;
 
 import com.alibaba.nacos.api.NacosFactory;
 import com.alibaba.nacos.api.config.ConfigService;

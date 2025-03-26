@@ -1,12 +1,15 @@
 package com.example.lgygateway.netty;
 
 import cn.hutool.json.JSONUtil;
+import com.example.lgygateway.circuitBreaker.CircuitBreaker;
+import com.example.lgygateway.config.CircuitBreakerConfig;
 import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.limit.SlidingWindowCounter;
 import com.example.lgygateway.limit.TokenBucket;
 import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
 import com.example.lgygateway.route.RouteTable;
+import com.example.lgygateway.utils.Log;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
@@ -42,6 +45,7 @@ import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.*;
 
+import static io.netty.handler.codec.http.HttpResponseStatus.SERVICE_UNAVAILABLE;
 import static io.netty.handler.codec.http.HttpResponseStatus.TOO_MANY_REQUESTS;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
@@ -54,6 +58,8 @@ public class AsyncNettyHttpServer {
     private static final Logger logger = LoggerFactory.getLogger(AsyncNettyHttpServer.class);
     @Autowired
     private NettyConfig nettyConfig;
+    @Autowired
+    private CircuitBreakerConfig circuitBreakerConfig;
     @Autowired
     private RouteTable routeTable; // 动态路由表
     // 定义全局的请求上下文缓存（线程安全）
@@ -75,6 +81,8 @@ public class AsyncNettyHttpServer {
     private final ConcurrentHashMap<String, TokenBucket> userBucketMap = new ConcurrentHashMap<>();
     // 用户令牌桶相关(游客限流体系)
     private final ConcurrentHashMap<String, TokenBucket> noUserBucketMap = new ConcurrentHashMap<>();
+    // 熔断器存储
+    private final ConcurrentHashMap<InetSocketAddress, CircuitBreaker> circuitBreakers = new ConcurrentHashMap<>();
 
     // 自定义ChannelPoolHandler
     class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
@@ -309,14 +317,24 @@ public class AsyncNettyHttpServer {
             logger.info("正在初始化服务令牌桶限流体系");
             /*
                后续可在这里扩展熔断器相关的逻辑
-
              */
+            // 获取或创建熔断器
+            CircuitBreaker circuitBreaker = circuitBreakers.computeIfAbsent(
+                    inetSocketAddress,
+                    k -> new CircuitBreaker(circuitBreakerConfig)
+            );
+            // 检查是否允许请求
+            if (!circuitBreaker.allowRequest()) {
+                sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
+                return;
+            }
             TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
             if (!tokenBucket.tryAcquire(1)) {
                 logger.info("该请求被限流");
                 sendErrorResponse(ctx, TOO_MANY_REQUESTS);
                 return;
             }
+
             String requestId = UUID.randomUUID().toString(); // 生成唯一ID
             ctx.channel().attr(REQUEST_ID_KEY).set(requestId); // 绑定到Channel属性（仅存储ID）
 
@@ -343,10 +361,14 @@ public class AsyncNettyHttpServer {
                             if (writeFuture.isSuccess()) {
                                 logger.info("成功发送请求");
                                 // 可在此处记录成功日志
+                                // 请求成功时记录成功
+                                circuitBreaker.recordSuccess();
                                 pool.release(channel);
                             } else {
                                 // 处理失败：记录异常、重试或响应错误
                                 logger.info("发送请求失败");
+                                // 请求失败时记录失败
+                                circuitBreaker.recordFailure();
                                 ReferenceCountUtil.safeRelease(request.content());
                                 handleSendError(ctx, pool, channel, writeFuture.cause());
                                 pool.release(channel); // 确保异常后释放连接
@@ -411,7 +433,7 @@ public class AsyncNettyHttpServer {
         } else {
             logger.info("重试次数为0 发送响应失败请求");
             request.release();
-            sendErrorResponse(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE);
+            sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
         }
     }
 
@@ -485,6 +507,12 @@ public class AsyncNettyHttpServer {
                 return v;
             });
             if (context != null) {
+                logger.info(context.getOriginalRequest().uri());
+                    try {
+                        circuitBreakerRecordMes(context,backendResponse);
+                    } catch (URISyntaxException e) {
+                        throw new RuntimeException(e);
+                    }
                 // 判断是否符合重试条件
                 if (shouldRetry(backendResponse, context.getOriginalRequest())) {
                     logger.info("响应符合重试条件 正在尝试重试");
@@ -599,6 +627,27 @@ public class AsyncNettyHttpServer {
         int exp = (int) Math.pow(2, nettyConfig.getTimes() - retries);
         int delay = Math.min(exp * base, maxDelay);
         return delay + ThreadLocalRandom.current().nextInt(500); // +0~500ms抖动
+    }
+
+    // 熔断器记录成功与失败的响应
+    private void circuitBreakerRecordMes(RequestContext context, FullHttpResponse backendResponse) throws URISyntaxException {
+        URI uri = new URI(context.originalRequest.uri());
+        InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
+        CircuitBreaker circuitBreaker = circuitBreakers.get(inetSocketAddress);
+        if (circuitBreaker == null) {
+            circuitBreaker = new CircuitBreaker(circuitBreakerConfig);
+            CircuitBreaker existing = circuitBreakers.putIfAbsent(inetSocketAddress, circuitBreaker);
+            if (existing != null) {
+                circuitBreaker = existing;
+            }
+        }
+        if (backendResponse.status().code() >= 500) {
+            Log.logger.info("熔断器记录失败次数");
+            circuitBreaker.recordFailure();
+        } else {
+            Log.logger.info("熔断器记录成功次数");
+            circuitBreaker.recordSuccess();
+        }
     }
 
 }

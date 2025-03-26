@@ -2,48 +2,51 @@ package com.example.lgygateway.circuitBreaker;
 
 import com.example.lgygateway.config.CircuitBreakerConfig;
 import lombok.Data;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
 
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicStampedReference;
+import java.util.concurrent.atomic.LongAdder;
 
-@Component
 public class CircuitBreaker {
     public enum State {
         CLOSED, OPEN, HALF_OPEN
     }
 
-    private final AtomicReference<State> state = new AtomicReference<>(State.CLOSED);
+    // 状态管理使用版本号原子引用
+    private final AtomicStampedReference<State> stateRef =
+            new AtomicStampedReference<>(State.CLOSED, 0);
     private final CircuitBreakerStats stats = new CircuitBreakerStats();
     private final AtomicInteger halfOpenPermits = new AtomicInteger(0);
     private final CircuitBreakerConfig config;
 
-    @Autowired
     public CircuitBreaker(CircuitBreakerConfig config) {
         this.config = config;
     }
-
     /**
      * 判断是否允许请求通过
      */
     public boolean allowRequest() {
-        if (state.get() == State.OPEN) {
-            // 检查是否应该尝试恢复
+        int[] stamp = new int[1];
+        State currentState = stateRef.get(stamp);
+
+        if (currentState == State.OPEN) {
             if (System.currentTimeMillis() - stats.getLastFailureTime() > config.getOpenTimeoutMs()) {
-                // CAS操作确保只有一个线程执行状态转换
-                if (state.compareAndSet(State.OPEN, State.HALF_OPEN)) {
+                // 使用CAS原子操作转换状态
+                if (stateRef.compareAndSet(State.OPEN, State.HALF_OPEN, stamp[0], stamp[0] + 1)) {
                     halfOpenPermits.set(config.getHalfOpenPermits());
                 }
-            } else {
-                return false;
+                return true;
             }
+            return false;
         }
 
-        if (state.get() == State.HALF_OPEN) {
-            // 半开状态下使用许可机制控制请求量
-            int currentPermits = halfOpenPermits.get();
-            return currentPermits > 0 && halfOpenPermits.compareAndSet(currentPermits, currentPermits - 1);
+        if (currentState == State.HALF_OPEN) {
+            int current;
+            do {
+                current = halfOpenPermits.get();
+                if (current <= 0) return false;
+            } while (!halfOpenPermits.compareAndSet(current, current - 1));
+            return true;
         }
 
         return true;
@@ -53,16 +56,17 @@ public class CircuitBreaker {
      * 记录成功请求
      */
     public void recordSuccess() {
-        if (state.get() == State.HALF_OPEN) {
-            // 半开状态下累计成功次数
-            int successCount = stats.getHalfOpenSuccessCount().incrementAndGet();
-            if (successCount >= config.getHalfOpenSuccessThreshold()) {
-                // 成功阈值达到，关闭熔断器
-                state.set(State.CLOSED);
+        State currentState = stateRef.getReference();
+        if (currentState == State.HALF_OPEN) {
+            stats.getHalfOpenSuccessCount().increment();
+            if (stats.getHalfOpenSuccessCount().sum() >= config.getHalfOpenSuccessThreshold()) {
+                // 仅在半开状态时才允许转换到关闭状态
+                stateRef.compareAndSet(State.HALF_OPEN, State.CLOSED,
+                        stateRef.getStamp(), stateRef.getStamp() + 1);
                 stats.reset();
             }
         } else {
-            stats.getClosedSuccessCount().incrementAndGet();
+            stats.getClosedSuccessCount().increment();
             tryResetFailureCount();
         }
     }
@@ -71,14 +75,14 @@ public class CircuitBreaker {
      * 记录失败请求
      */
     public void recordFailure() {
-        stats.getFailureCount().incrementAndGet();
+        stats.getFailureCount().increment();
         stats.setLastFailureTime(System.currentTimeMillis());
 
-        if (state.get() == State.HALF_OPEN) {
-            // 半开状态下遇到任何失败立即恢复熔断
-            state.set(State.OPEN);
+        State currentState = stateRef.getReference();
+        if (currentState == State.HALF_OPEN) {
+            stateRef.set(State.OPEN, stateRef.getStamp() + 1);
         } else if (shouldTrip()) {
-            state.set(State.OPEN);
+            stateRef.set(State.OPEN, stateRef.getStamp() + 1);
         }
     }
 
@@ -86,10 +90,14 @@ public class CircuitBreaker {
      * 自动重置闭合状态下的失败计数器
      */
     private void tryResetFailureCount() {
-        int total = stats.getClosedSuccessCount().get() + stats.getFailureCount().get();
+        long total = stats.getClosedSuccessCount().sum() + stats.getFailureCount().sum();
         if (total >= config.getCounterResetThreshold()) {
-            stats.getClosedSuccessCount().set(0);
-            stats.getFailureCount().set(0);
+            synchronized (stats) {
+                if (stats.getClosedSuccessCount().sum() + stats.getFailureCount().sum() >= config.getCounterResetThreshold()) {
+                    stats.getClosedSuccessCount().reset();
+                    stats.getFailureCount().reset();
+                }
+            }
         }
     }
 
@@ -97,14 +105,13 @@ public class CircuitBreaker {
      * 判断是否应该触发熔断
      */
     private boolean shouldTrip() {
-        int success = stats.getClosedSuccessCount().get();
-        int failure = stats.getFailureCount().get();
-        int total = success + failure;
+        long success = stats.getClosedSuccessCount().sum();
+        long failure = stats.getFailureCount().sum();
+        long total = success + failure;
 
         if (total < config.getMinRequestThreshold()) {
             return false;
         }
-
         double failureRate = (failure * 100.0) / total;
         return failureRate >= config.getFailureThreshold();
     }
@@ -114,15 +121,34 @@ public class CircuitBreaker {
      */
     @Data
     private static class CircuitBreakerStats {
-        private final AtomicInteger closedSuccessCount = new AtomicInteger(0);
-        private final AtomicInteger failureCount = new AtomicInteger(0);
-        private final AtomicInteger halfOpenSuccessCount = new AtomicInteger(0);
-        private volatile long lastFailureTime = 0;
+        private final LongAdder closedSuccessCount = new LongAdder();
+        private final LongAdder failureCount = new LongAdder();
+        private final LongAdder halfOpenSuccessCount = new LongAdder();
+        private volatile long lastFailureTime;
         public void reset() {
-            closedSuccessCount.set(0);
-            failureCount.set(0);
-            halfOpenSuccessCount.set(0);
+            closedSuccessCount.reset();
+            failureCount.reset();
+            halfOpenSuccessCount.reset();
             lastFailureTime = 0;
         }
+    }
+    /**
+     * 监控数据获取方法
+     */
+    public CircuitBreakerMetrics getMetrics() {
+        return new CircuitBreakerMetrics(
+                stateRef.getReference(),
+                stats.getClosedSuccessCount().sum(),
+                stats.getFailureCount().sum(),
+                stats.getHalfOpenSuccessCount().sum()
+        );
+    }
+
+    @Data
+    public static class CircuitBreakerMetrics {
+        private final State state;
+        private final long closedSuccess;
+        private final long failures;
+        private final long halfOpenSuccess;
     }
 }

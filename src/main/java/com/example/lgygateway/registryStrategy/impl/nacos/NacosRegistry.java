@@ -329,13 +329,16 @@ public class NacosRegistry implements Registry, DisposableBean {
         public void onEvent(Event event) {
             try {
                 List<Instance> newInstances = namingService.selectInstances(serviceName, true);
+                Log.logger.info("更新新服务的路由");
                 // 遍历所有关联路径进行更新
                 boundPaths.keySet().forEach(path ->
                         routeDataRef.updateAndGet(current -> {
                             Map<String, List<Instance>> newRules = new HashMap<>(current.rules);
                             if (newInstances.isEmpty()) {
+                                Log.logger.info("正在删除 {} 服务", serviceName);
                                 newRules.remove(path);
                             } else {
+                                Log.logger.info("正在更新 {} 的 {} 服务",path, serviceName);
                                 newRules.put(path, newInstances);
                             }
                             return new RouteData(newRules, current.values);

@@ -192,16 +192,15 @@ public class NacosRegistry implements Registry, DisposableBean {
                             //由于在路由表中可能存在不同路径指向同一个服务集群 所以需要保证原子性
                             subscribedServices.computeIfAbsent(serviceName, k -> {
                                 try {
-                                    InstanceChangeListener instanceChangeListener = new InstanceChangeListener(k, path);
-                                    namingService.subscribe(k, instanceChangeListener);
-                                    // 使用merge方法实现原子计数
+                                    InstanceChangeListener listener = new InstanceChangeListener(k);
+                                    namingService.subscribe(k, listener);
                                     servicesCount.merge(k, 1, Integer::sum);
-                                    return instanceChangeListener;
+                                    return listener;
                                 } catch (NacosException e) {
                                     Log.logger.error("订阅失败: {}", k, e);
-                                    throw new CompletionException(e); // 抛出异常终止任务
+                                    throw new CompletionException(e);
                                 }
-                            });
+                            }).addPath(path); // 向已有监听器添加新路径
                         } catch (NacosException e) {
                             throw new RuntimeException("无法获取服务实例: " + serviceName, e);
                         }
@@ -315,36 +314,32 @@ public class NacosRegistry implements Registry, DisposableBean {
     // 服务相关的监听器
     private class InstanceChangeListener implements EventListener {
         private final String serviceName;
-        private final String path;
+        private final ConcurrentHashMap<String, Boolean> boundPaths = new ConcurrentHashMap<>();
 
-        public InstanceChangeListener(String serviceName, String path) {
+        public InstanceChangeListener(String serviceName) { // 移除path参数
             this.serviceName = serviceName;
-            this.path = path;
+        }
+
+        public void addPath(String path) {
+            boundPaths.put(path, true);
         }
 
         @Override
         public void onEvent(Event event) {
             try {
-                // 获取最新实例列表并更新路由
-                // 只选择健康实例
                 List<Instance> newInstances = namingService.selectInstances(serviceName, true);
-                if (newInstances.isEmpty()) {
-                    routeDataRef.getAndUpdate(current -> {
-                        ConcurrentHashMap<String, List<Instance>> newRules = new ConcurrentHashMap<>(current.rules);
-                        ConcurrentHashMap<String, RouteValue> newValues = new ConcurrentHashMap<>(current.values);
-                        newRules.remove(path);
-                        return new RouteData(newRules, newValues);
-                    });
-                    Log.logger.warn("路由[{}]所有实例已下线，路径已移除", path);
-                } else {
-                    routeDataRef.getAndUpdate(current -> {
-                        ConcurrentHashMap<String, List<Instance>> newRules = new ConcurrentHashMap<>(current.rules);
-                        ConcurrentHashMap<String, RouteValue> newValues = new ConcurrentHashMap<>(current.values);
-                        newRules.put(path, newInstances);
-                        return new RouteData(newRules, newValues);
-                    });
-                    Log.logger.info("服务实例更新:{} -> {} , 当前服务实例个数为。{}", serviceName, newInstances, newInstances.size());
-                }
+                // 遍历所有关联路径进行更新
+                boundPaths.keySet().forEach(path ->
+                        routeDataRef.updateAndGet(current -> {
+                            Map<String, List<Instance>> newRules = new HashMap<>(current.rules);
+                            if (newInstances.isEmpty()) {
+                                newRules.remove(path);
+                            } else {
+                                newRules.put(path, newInstances);
+                            }
+                            return new RouteData(newRules, current.values);
+                        })
+                );
             } catch (NacosException e) {
                 // 异常处理...
             }

@@ -17,15 +17,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
-
-/*
-关键改进点：
-精确路由匹配：避免误匹配。
-原子快照：解决并发更新问题。
-资源管理：防止内存泄漏。
-过滤器副作用处理：传递修改后的请求。
-性能提升：通过 Trie 树将匹配复杂度从 O(N) 降至 O(log N)，适合大规模路由规则。
- */
+// TODO：1) 当前路由规则很简单 当请求路径包含/xxxx/就符合 后续应该优化复杂一些 比如/xxxx/* 代码/xxxx/后只允许一个参数 /xxxx/** 表示有无均可
+//       2) 路由匹配算法优化 现在方法为contains且是遍历map 时间复杂度为O(n) 需要进行相关的优化
 @Component
 public class RouteTable {
 
@@ -35,6 +28,7 @@ public class RouteTable {
     public FullHttpRequest matchRouteAsync(String url,FullHttpRequest request) throws URISyntaxException {
         Log.logger.info("正在获取路由表");
         Map<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
+        Map<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
         //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
         //也会对后续匹配进行优化
         Log.logger.info("正在判断该请求是否符合转发标准 {}",url);
@@ -42,7 +36,6 @@ public class RouteTable {
             //当查询到请求中符合网关转发规则
             if (url.contains(entry.getKey())) {
                 Log.logger.info("该路径 {} 存在于规则当中,正在判断是否符合其他条件",entry.getKey());
-                Map<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
                 if (successFiltering(request,entry.getKey(),routeValues)) {
                     Log.logger.info("符合转发标准，正在获取实例");
                     //获取到服务实例

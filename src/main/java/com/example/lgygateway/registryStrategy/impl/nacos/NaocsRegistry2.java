@@ -117,7 +117,6 @@ public class NaocsRegistry2 implements Registry {
             e.fillInStackTrace();
         }
     }
-    //TODO 更新后续多个path指向同一个服务
     private class InstanceChangeListener implements EventListener {
         private final String serviceName;
         private final String path;

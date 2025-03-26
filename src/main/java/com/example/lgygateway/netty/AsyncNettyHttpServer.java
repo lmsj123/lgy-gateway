@@ -44,25 +44,11 @@ import java.util.concurrent.*;
 
 import static io.netty.handler.codec.http.HttpResponseStatus.TOO_MANY_REQUESTS;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
-//请求接收 → 全局限流 → 用户级限流 → 路由匹配 → 服务级限流 → 连接池获取 → 后端请求 → 响应处理
-/*
-潜在问题
-(1) 性能瓶颈
-路由匹配效率低：RouteTable.matchRouteAsync 使用线性遍历 url.contains(entry.getKey())，时间复杂度为 O(N)，无法支持大规模路由规则。
-锁竞争：ConcurrentHashMap 在频繁更新时可能导致线程竞争（如 routeRules 动态更新）。
-(2) 资源管理缺陷
-连接池预热不足：预热仅初始化10%连接，突发流量下可能触发连接创建延迟。
-内存泄漏风险：
-requestContextMap 未完全清理（如请求失败未移除 requestId）。
-ByteBuf 未在异常分支完全释放（如 handleAcquireFailure 中可能遗漏）。
-(3) 异常处理不足
-重试逻辑缺陷：仅对 ConnectException 和 TimeoutException 触发重试，未覆盖其他可恢复异常（如 IOException）。
-错误响应标准化缺失：sendErrorResponse 返回的JSON格式未统一，可能暴露内部错误信息。
-(4) 可维护性问题
-硬编码配置：线程池大小、超时时间、限流参数等硬编码，无法动态调整。
-熔断器缺失：无熔断机制，无法在后端服务不可用时快速失败。
- */
-// 后续修改为异步日志避免影响性能
+
+//TODO 1)后续可改为异步日志 提高相对应性能
+//     2)后续可以添加熔断机制，快速失败
+//     3)后续将相关配置优化为可动态调整
+//     4)后续优化成可以适配https等
 @Component
 public class AsyncNettyHttpServer {
     private static final Logger logger = LoggerFactory.getLogger(AsyncNettyHttpServer.class);
@@ -394,32 +380,32 @@ public class AsyncNettyHttpServer {
     // 处理连接获取失败
     private void handleAcquireFailure(ChannelHandlerContext ctx, FullHttpRequest request, int retries, Throwable cause) throws URISyntaxException {
         if (retries > 0) {
-            // 错误类型判断
-            if (!isRetriableError(cause)) {
-                sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
-                return;
-            }
-            logger.info("正在重试 重试次数还剩余 {}", retries);
-            if (limit(ctx, request)) {
-                return;
-            }
-            URI uri = new URI(request.uri());
-            InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
-            TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
-            if (!tokenBucket.tryAcquire(1)) {
-                logger.info("该请求被限流");
-                sendErrorResponse(ctx, TOO_MANY_REQUESTS);
-                return;
-            }
-            // 指数退避+随机抖动（替换固定1秒）
-            int totalDelayMs = calculateBackoffDelay(retries);
-            request.retain();
             try {
+                // 错误类型判断
+                if (!isRetriableError(cause)) {
+                    sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+                    return;
+                }
+                logger.info("正在重试 重试次数还剩余 {}", retries);
+                if (limit(ctx, request)) {
+                    return;
+                }
+                URI uri = new URI(request.uri());
+                InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
+                TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
+                if (!tokenBucket.tryAcquire(1)) {
+                    logger.info("该请求被限流");
+                    sendErrorResponse(ctx, TOO_MANY_REQUESTS);
+                    return;
+                }
+                // 指数退避+随机抖动（替换固定1秒）
+                int totalDelayMs = calculateBackoffDelay(retries);
+                request.retain();
                 ctx.channel().eventLoop().schedule(() ->
                                 forwardRequestWithRetry(ctx, request, retries - 1),
                         totalDelayMs, TimeUnit.MILLISECONDS
                 );
-            }finally {
+            } finally {
                 request.release(); // 确保释放
             }
         } else {
@@ -451,7 +437,7 @@ public class AsyncNettyHttpServer {
                         () -> forwardRequestWithRetry(ctx, request, retries - 1),
                         totalDelayMs, TimeUnit.MILLISECONDS
                 );
-            }finally {
+            } finally {
                 request.release();
             }
 
@@ -555,6 +541,7 @@ public class AsyncNettyHttpServer {
         }
     }
 
+    //发送失败响应给客户端
     private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status) {
         // 构建JSON错误信息对象
         Map<String, Object> errorData = new HashMap<>();
@@ -591,12 +578,14 @@ public class AsyncNettyHttpServer {
 
         // 发送响应并关闭连接
         ctx.writeAndFlush(response);
-                //.addListener(ChannelFutureListener.CLOSE);频繁建立连接会增加TCP握手开销
+        //.addListener(ChannelFutureListener.CLOSE);频繁建立连接会增加TCP握手开销
     }
 
+    //从请求中获取userId
     private String extractUserId(FullHttpRequest request) {
         return "1";
     }
+
     // 辅助方法：判断是否可重试错误
     private boolean isRetriableError(Throwable cause) {
         return cause instanceof ConnectException ||

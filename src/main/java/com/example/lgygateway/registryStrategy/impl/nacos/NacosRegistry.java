@@ -34,12 +34,14 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
-
+//TODO 1) SPI相关的缓存策略 现在策略是每次配置文件更新时都会通过SPI机制加载相对应的实例 后续可以通过本地缓存或者Redis进行优化判断
+//     2) 对对应的路由规则添加版本号，后续可支持灰度发布和回滚
 @Component("nacos")
 @Lazy
 public class NacosRegistry implements Registry, DisposableBean {
-    record RouteData(Map<String, List<Instance>> rules, Map<String, RouteValue> values) {
-    }
+    //rules: path -> instances
+    //values: path -> RouteValue
+    record RouteData(Map<String, List<Instance>> rules, Map<String, RouteValue> values) {}
 
     // 存储路由
     // 使用原子引用+副本策略保证路由更新原子性
@@ -56,12 +58,10 @@ public class NacosRegistry implements Registry, DisposableBean {
 
     @Autowired
     private NacosConfig nacosConfig;
-    // 已订阅的服务名集合（防止重复订阅）
+    // 已订阅的服务名集合（防止重复订阅）service -> listener
     private final ConcurrentHashMap<String, InstanceChangeListener> subscribedServices = new ConcurrentHashMap<>();
-    // 已存在的路由 用于判断是否增量或者全量更新
+    // 已存在的路由 用于判断是否增量或者全量更新 id -> route
     private final ConcurrentHashMap<String, Route> existingRoutes = new ConcurrentHashMap<>();
-    // 已存在的映射服务数量 用于判断在删除一个path之后是否还存在其他路径映射
-    private final ConcurrentHashMap<String, Integer> servicesCount = new ConcurrentHashMap<>();
     //用来通过服务名获取集群
     private NamingService namingService;
     //用于监听路由规则的更新
@@ -125,8 +125,6 @@ public class NacosRegistry implements Registry, DisposableBean {
         }
     }
 
-    //TODO 动态线程池调参：根据任务负载动态调整核心线程数（参考setCorePoolSize）
-    //      路由增量更新：记录已变更的路由路径，仅更新差异部分。
     //需要注意的是 这里监听的是配置文件 在我们正常开发当中 频繁多个线程修改配置文件的场景基本不存在
     //但如果后续出现了这样的场景 需要对lock锁进行优化
     private void parseAndUpdateRouteRules(String content) {
@@ -136,18 +134,22 @@ public class NacosRegistry implements Registry, DisposableBean {
             ConcurrentHashMap<String, List<Instance>> rules = new ConcurrentHashMap<>();
             ConcurrentHashMap<String, RouteValue> values = new ConcurrentHashMap<>();
             List<Route> routes = analysisYaml(content);
+            Log.logger.info("正在获取解析的routes");
             // 构建新旧路由标识映射
             Set<String> newRouteIds = routes.stream().parallel()
                     .map(Route::getId)
                     .collect(Collectors.toSet());
 
+            Log.logger.info("正在获取被删除的路由");
             // 检测被删除的路由
             Set<String> deletedRoutes = existingRoutes.keySet().stream().parallel()
                     .filter(id -> !newRouteIds.contains(id))
                     .collect(Collectors.toSet());
 
-            // 处理删除的路由
-            processDeletedRoutes(deletedRoutes);
+            if (!deletedRoutes.isEmpty()) {
+                // 处理删除的路由
+                processDeletedRoutes(deletedRoutes);
+            }
 
             // 启用多线程优化性能
             List<CompletableFuture<Void>> futures = new ArrayList<>();
@@ -194,7 +196,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                                 try {
                                     InstanceChangeListener listener = new InstanceChangeListener(k);
                                     namingService.subscribe(k, listener);
-                                    servicesCount.merge(k, 1, Integer::sum);
+                                    Log.logger.info("{} 服务的监听器已订阅 {} 路径", k, path);
                                     return listener;
                                 } catch (NacosException e) {
                                     Log.logger.error("订阅失败: {}", k, e);
@@ -233,7 +235,7 @@ public class NacosRegistry implements Registry, DisposableBean {
         deletedRoutes.forEach(routeId -> {
             Route removedRoute = existingRoutes.remove(routeId);
             String path = removedRoute.getPredicates().getPath();
-
+            Log.logger.info("被删除的路径为 {}", path);
             // 从路由数据中移除
             routeDataRef.getAndUpdate(current -> {
                 Map<String, List<Instance>> newRules = new HashMap<>(current.rules);
@@ -256,13 +258,13 @@ public class NacosRegistry implements Registry, DisposableBean {
     // 由于在lock所机制的干预下无需担心线程不安全问题
     private void cleanupSubscription(Route removedRoute) throws NacosException {
         String serviceName = removedRoute.getUri().substring(LB_PREFIX.length());
-        Integer count = servicesCount.get(serviceName);
-        if (count == 1) {
-            servicesCount.remove(serviceName);
-            InstanceChangeListener remove = subscribedServices.remove(serviceName);
-            namingService.unsubscribe(serviceName, remove);
-        } else {
-            servicesCount.put(serviceName, count - 1);
+        InstanceChangeListener instanceChangeListener = subscribedServices.get(serviceName);
+        instanceChangeListener.boundPaths.remove(removedRoute.getPredicates().getPath());
+        Log.logger.info("正在判断 {} 对应的 {} 服务是否还存在其他路径引用", removedRoute.getPredicates().getPath(), serviceName);
+        if (instanceChangeListener.boundPaths.isEmpty()) {
+            Log.logger.info("{} 对应的 {} 服务不存在其他路径引用了", removedRoute.getPredicates().getPath(), serviceName);
+            namingService.unsubscribe(serviceName, instanceChangeListener);
+            subscribedServices.remove(serviceName);
         }
     }
 
@@ -274,7 +276,6 @@ public class NacosRegistry implements Registry, DisposableBean {
         Route oldRoute = existingRoutes.get(route.getId());
         return !route.equals(oldRoute);
     }
-    //TODO 后续添加缓存机制
 
     //预先加载所有 LoadServer 实现
     private static List<SPILoadStrategyFactory> loadAllLoadBalancers() {
@@ -323,7 +324,7 @@ public class NacosRegistry implements Registry, DisposableBean {
         public void addPath(String path) {
             boundPaths.put(path, true);
         }
-
+        // 只能改与服务名相关的属性
         @Override
         public void onEvent(Event event) {
             try {

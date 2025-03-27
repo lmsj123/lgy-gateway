@@ -45,12 +45,11 @@ import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.*;
 
-import static io.netty.handler.codec.http.HttpResponseStatus.SERVICE_UNAVAILABLE;
-import static io.netty.handler.codec.http.HttpResponseStatus.TOO_MANY_REQUESTS;
+import static io.netty.handler.codec.http.HttpResponseStatus.*;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
 //TODO 1)后续可改为异步日志 提高相对应性能
-//     2)后续可以添加熔断机制，快速失败
+//     2)后续可以添加熔断机制，快速失败（已完成）
 //     3)后续将相关配置优化为可动态调整
 //     4)后续优化成可以适配https等
 @Component
@@ -137,7 +136,7 @@ public class AsyncNettyHttpServer {
         this.poolMap = new AbstractChannelPoolMap<>() {
             @Override
             protected FixedChannelPool newPool(InetSocketAddress key) {
-                logger.info("正在初始化由ip端口获取的连接池（线程隔离的思路）");
+                logger.info("正在初始化 {}:{} 的连接池", key.getAddress(), key.getPort());
                 FixedChannelPool pool = new FixedChannelPool(
                         clientBootstrap.remoteAddress(key),
                         new CustomChannelPoolHandler(),
@@ -156,7 +155,8 @@ public class AsyncNettyHttpServer {
                             if (future.isSuccess()) {
                                 Channel ch = (Channel) future.getNow();
                                 pool.release(ch); // 立即释放连接至池中
-                                logger.info("预热连接{}已释放", ch.id());
+                                //释放操作并非关闭连接，而是将其标记为空闲状态，供后续请求复用。
+                                logger.info("预热连接 {} 已释放至连接池 为空闲状态", ch.id());
                             } else {
                                 logger.error("预热失败: {}", future.cause().getMessage());
                             }
@@ -231,6 +231,7 @@ public class AsyncNettyHttpServer {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        logger.info("正在初始化GatewayHandler（请求阶段）");
                         ch.pipeline()
                                 // 4.1 HTTP协议编解码器（必须第一顺位）
                                 .addLast(new HttpServerCodec()) // 组合HttpRequestDecoder+HttpResponseEncoder
@@ -273,6 +274,7 @@ public class AsyncNettyHttpServer {
 
     //发送端
     private class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
+        //SimpleChannelInboundHandler 在 channelRead0 方法执行完毕后会自动调用 ReferenceCountUtil.release(msg)，因此无需手动释放请求对象。
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
             // [1] 处理OPTIONS预检请求（CORS）
@@ -291,10 +293,10 @@ public class AsyncNettyHttpServer {
             logger.info("接受到来自{}的请求", request.uri());
 
             // [3] 全局限流检查（滑动窗口算法）
-            logger.info("正在根据滑动窗口判断是否需要限流（全局限流体系）");
             if (limit(ctx, request)) { // 触发限流则阻断请求
                 return;
             }
+
             // [4] 路由匹配（异步匹配）
             FullHttpRequest httpRequest = routeTable.matchRouteAsync(request.uri(), request);
             if (httpRequest != null) { // 匹配成功
@@ -302,7 +304,8 @@ public class AsyncNettyHttpServer {
                 // [5] 带重试机制的请求转发
                 forwardRequestWithRetry(ctx, httpRequest, nettyConfig.getTimes()); // 可配置重试次数
             } else { // 匹配失败
-                logger.info("路由匹配失败");
+                logger.info("路由匹配失败 释放相关请求");
+                // ReferenceCountUtil.safeRelease(request);
                 // [6] 返回404错误
                 sendErrorResponse(ctx, HttpResponseStatus.NOT_FOUND);
             }
@@ -311,159 +314,163 @@ public class AsyncNettyHttpServer {
 
     //使用了连接池长连接 避免每次都进行tcp连接
     private void forwardRequestWithRetry(ChannelHandlerContext ctx, FullHttpRequest request, int retries) {
+        URI uri = null;
         try {
-            URI uri = new URI(request.uri());
-            InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
-            logger.info("正在初始化服务令牌桶限流体系");
-            /*
-               后续可在这里扩展熔断器相关的逻辑
-             */
-            // 获取或创建熔断器
-            CircuitBreaker circuitBreaker = circuitBreakers.computeIfAbsent(
-                    inetSocketAddress,
-                    k -> new CircuitBreaker(circuitBreakerConfig)
-            );
-            // 检查是否允许请求
-            if (!circuitBreaker.allowRequest()) {
-                sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
-                return;
-            }
-            TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
-            if (!tokenBucket.tryAcquire(1)) {
-                logger.info("该请求被限流");
-                sendErrorResponse(ctx, TOO_MANY_REQUESTS);
-                return;
-            }
-
-            String requestId = UUID.randomUUID().toString(); // 生成唯一ID
-            ctx.channel().attr(REQUEST_ID_KEY).set(requestId); // 绑定到Channel属性（仅存储ID）
-
-            // 存储到全局缓存（包含完整上下文）
-            requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request), System.currentTimeMillis()));
-
-
-            //获取或创建连接池
-            FixedChannelPool pool = poolMap.get(inetSocketAddress);
-            request.headers().set(HttpHeaderNames.HOST, uri.getHost() + ':' + uri.getPort());
-            request.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
-            //从池中获取channel
-            logger.info("正在从连接池中获取连接");
-            pool.acquire().addListener((Future<Channel> future) -> {
-                //当异步获取pool中的channel成功时会进入下面的分支
-                if (future.isSuccess()) {
-                    logger.info("获取连接成功");
-                    Channel channel = future.getNow();
-                    try {
-                        //绑定元数据到channel
-                        channel.attr(REQUEST_ID_KEY).set(requestId);
-                        //发送请求
-                        channel.writeAndFlush(request).addListener((ChannelFuture writeFuture) -> {
-                            if (writeFuture.isSuccess()) {
-                                logger.info("成功发送请求");
-                                // 可在此处记录成功日志
-                                // 请求成功时记录成功
-                                circuitBreaker.recordSuccess();
-                                pool.release(channel);
-                            } else {
-                                // 处理失败：记录异常、重试或响应错误
-                                logger.info("发送请求失败");
-                                // 请求失败时记录失败
-                                circuitBreaker.recordFailure();
-                                ReferenceCountUtil.safeRelease(request.content());
-                                handleSendError(ctx, pool, channel, writeFuture.cause());
-                                pool.release(channel); // 确保异常后释放连接
-                            }
-                        });
-                    } catch (Exception e) {
-                        ReferenceCountUtil.safeRelease(request.content());
-                        handleSendError(ctx, pool, channel, e);
-                    }
-                } else {
-                    logger.info("获取连接失败");
-                    // 获取连接失败处理
-                    handleAcquireFailure(ctx, request, retries, future.cause());
-                }
-            });
+            uri = new URI(request.uri());
         } catch (URISyntaxException e) {
             sendErrorResponse(ctx, HttpResponseStatus.BAD_REQUEST);
-            request.release();
+            ReferenceCountUtil.safeRelease(request); // 无论成功或失败，最终释放请求资源
         }
-    }
+        InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
+        logger.info("正在获取 {}:{} 的熔断器", uri.getHost(), uri.getPort());
+        //高并发下多个线程可能同时执行 new CircuitBreaker，导致资源浪费或状态不一致。
+        //若 TokenBucket 构造函数无副作用，可以接受短暂重复创建，但需确保 TokenBucket 自身线程安全
+        //可考虑优化成双重锁
+        CircuitBreaker circuitBreaker = circuitBreakers.computeIfAbsent(
+                inetSocketAddress,
+                k -> new CircuitBreaker(circuitBreakerConfig)
+        );
+        // 检查是否允许请求
+        if (!circuitBreaker.allowRequest()) {
+            logger.info("熔断器发挥降级作用，释放相关请求");
+            ReferenceCountUtil.safeRelease(request);
+            sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
+            return;
+        }
+        TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
+        if (!tokenBucket.tryAcquire(1)) {
+            logger.info("该 {}:{} 服务实例被限流 释放相关请求", uri.getHost(), uri.getPort());
+            ReferenceCountUtil.safeRelease(request);
+            sendErrorResponse(ctx, TOO_MANY_REQUESTS);
+            return;
+        }
 
-    // 处理发送失败
-    private void handleSendError(ChannelHandlerContext ctx, FixedChannelPool pool, Channel ch, Throwable cause) {
-        // 自动触发健康检查
-        if (ch.isActive()) {
-            pool.release(ch);
-        }
-        sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+        String requestId = UUID.randomUUID().toString(); // 生成唯一ID
+        ctx.channel().attr(REQUEST_ID_KEY).set(requestId); // 绑定到Channel属性（仅存储ID）
+
+        // 存储到全局缓存（包含完整上下文）
+        requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request), System.currentTimeMillis()));
+
+
+        //获取或创建连接池
+        FixedChannelPool pool = poolMap.get(inetSocketAddress);
+        request.headers().set(HttpHeaderNames.HOST, uri.getHost() + ':' + uri.getPort());
+        request.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
+        //从池中获取channel
+        logger.info("正在从 {}:{} 的连接池中获取连接", uri.getHost(), uri.getPort());
+        pool.acquire().addListener((Future<Channel> future) -> {
+            //当异步获取pool中的channel成功时会进入下面的分支
+            if (future.isSuccess()) {
+                logger.info("获取连接成功");
+                Channel channel = future.getNow();
+                try {
+                    //绑定元数据到channel
+                    channel.attr(REQUEST_ID_KEY).set(requestId);
+                    //发送请求
+                    channel.writeAndFlush(request).addListener((ChannelFuture writeFuture) -> {
+                        if (writeFuture.isSuccess()) {
+                            logger.info("成功发送请求");
+                            // 请求成功时记录成功
+                            circuitBreaker.recordSuccess();
+                        } else {
+                            // 处理失败：记录异常、重试或响应错误
+                            logger.info("发送请求失败");
+                            // 请求失败时记录失败
+                            circuitBreaker.recordFailure();
+                            sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+                            ReferenceCountUtil.safeRelease(request);//成功发送情况下会自动释放request
+                            pool.release(channel); // 确保异常后释放连接
+                        }
+                    });
+                } catch (Exception e) {
+                    if (channel != null) {
+                        pool.release(channel); // 强制释放连接
+                    }
+                    requestContextMap.remove(requestId);
+                    channel.attr(REQUEST_ID_KEY).set(null);
+                    sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+                    ReferenceCountUtil.safeRelease(request);
+                }
+            } else {
+                logger.info("获取连接失败");
+                // 获取连接失败处理
+                handleAcquireFailure(ctx, request, retries, future.cause());
+            }
+        });
     }
 
     // 处理连接获取失败
     private void handleAcquireFailure(ChannelHandlerContext ctx, FullHttpRequest request, int retries, Throwable cause) throws URISyntaxException {
         if (retries > 0) {
-            try {
-                // 错误类型判断
-                if (!isRetriableError(cause)) {
-                    sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
-                    return;
-                }
-                logger.info("正在重试 重试次数还剩余 {}", retries);
-                if (limit(ctx, request)) {
-                    return;
-                }
-                URI uri = new URI(request.uri());
-                InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
-                TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
-                if (!tokenBucket.tryAcquire(1)) {
-                    logger.info("该请求被限流");
-                    sendErrorResponse(ctx, TOO_MANY_REQUESTS);
-                    return;
-                }
-                // 指数退避+随机抖动（替换固定1秒）
-                int totalDelayMs = calculateBackoffDelay(retries);
-                request.retain();
-                ctx.channel().eventLoop().schedule(() ->
-                                forwardRequestWithRetry(ctx, request, retries - 1),
-                        totalDelayMs, TimeUnit.MILLISECONDS
-                );
-            } finally {
-                request.release(); // 确保释放
+            // 错误类型判断
+            if (!isRetriableError(cause)) {
+                logger.info("错误的类型 释放请求连接");
+                ReferenceCountUtil.safeRelease(request);
+                sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+                return;
             }
-        } else {
-            logger.info("重试次数为0 发送响应失败请求");
-            request.release();
-            sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
-        }
-    }
-
-    // 修改后的handleRetry方法
-    private void handleRetry(ChannelHandlerContext ctx, FullHttpRequest request, Integer retries) throws URISyntaxException {
-        logger.warn("Retrying request to {} (remaining {} retries)", request.uri(), retries);
-        if (retries != null && retries > 0) {
             if (limit(ctx, request)) {
+                logger.info("该请求被限流 释放请求连接");
+                ReferenceCountUtil.safeRelease(request);
                 return;
             }
             URI uri = new URI(request.uri());
             InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
             TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
             if (!tokenBucket.tryAcquire(1)) {
-                logger.info("该请求被限流");
+                logger.info("该 {}:{} 服务实例被限流 释放请求连接", uri.getHost(), uri.getPort());
+                ReferenceCountUtil.safeRelease(request);
                 sendErrorResponse(ctx, TOO_MANY_REQUESTS);
                 return;
             }
+            logger.info("正在重试 重试次数还剩余 {}", retries);
+            // 指数退避+随机抖动（替换固定1秒）
             int totalDelayMs = calculateBackoffDelay(retries);
-            try {
-                request.retain();
-                ctx.channel().eventLoop().schedule(
-                        () -> forwardRequestWithRetry(ctx, request, retries - 1),
-                        totalDelayMs, TimeUnit.MILLISECONDS
-                );
-            } finally {
-                request.release();
+            ctx.channel().eventLoop().schedule(() ->
+                            forwardRequestWithRetry(ctx, request, retries - 1),
+                    totalDelayMs, TimeUnit.MILLISECONDS
+            );
+        } else {
+            logger.info("重试次数为0 发送响应失败请求");
+            ReferenceCountUtil.safeRelease(request);
+            sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
+        }
+    }
+    // 这里重试请求是需要拷贝副本的
+    private void handleRetry(ChannelHandlerContext ctx, FullHttpRequest request, Integer retries) throws URISyntaxException {
+        logger.warn("Retrying request to {} (remaining {} retries)", request.uri(), retries);
+        if (retries != null && retries > 0) {
+            // 这里的request已经因为channel.writeAndFlush(request)而回收了 所以不能以该请求作为重试请求
+            // 创建请求副本并增加引用计数
+            FullHttpRequest copiedRequest = copyAndRetainRequest(request);
+            if (copiedRequest == null) {
+                sendErrorResponse(ctx, BAD_GATEWAY);
+                return;
             }
+            if (limit(ctx, copiedRequest)) {
+                logger.info("该请求被限流 释放副本请求");
+                ReferenceCountUtil.safeRelease(request);
+                return;
+            }
+            URI uri = new URI(request.uri());
+            InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
+            TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
+            if (!tokenBucket.tryAcquire(1)) {
+                logger.info("该 {}:{} 服务实例被限流 释放副本请求", uri.getHost(), uri.getPort());
+                sendErrorResponse(ctx, TOO_MANY_REQUESTS);
+                ReferenceCountUtil.safeRelease(copiedRequest);
+                return;
+            }
+            logger.info("正在重试 重试次数还剩余 {}", retries);
+            int totalDelayMs = calculateBackoffDelay(retries);
+
+            ctx.channel().eventLoop().schedule(
+                    () -> forwardRequestWithRetry(ctx, copiedRequest, retries - 1),
+                    totalDelayMs, TimeUnit.MILLISECONDS
+            );
 
         } else {
+            logger.info("重试次数耗尽 发送失败响应");
             sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
         }
     }
@@ -471,7 +478,7 @@ public class AsyncNettyHttpServer {
     // 全局限流和用户级限流的校验
     private boolean limit(ChannelHandlerContext ctx, FullHttpRequest request) {
         if (!counter.allowRequest(nettyConfig.getMaxQps())) {
-            logger.info("该请求被限流");
+            logger.info("全局限流体系（滑动窗口）提示请求被限流");
             sendErrorResponse(ctx, TOO_MANY_REQUESTS);
             return true;
         }
@@ -486,7 +493,7 @@ public class AsyncNettyHttpServer {
         } else {
             TokenBucket noUserTokenBucket = noUserBucketMap.computeIfAbsent("noUser", k -> new TokenBucket(nettyConfig.getNoUserMaxBurst(), nettyConfig.getNoUserTokenRefillRate()));
             if (!noUserTokenBucket.tryAcquire(1)) {
-                logger.info("游客被限流");
+                logger.info("该游客被限流");
                 sendErrorResponse(ctx, TOO_MANY_REQUESTS);
                 return true;
             }
@@ -494,35 +501,39 @@ public class AsyncNettyHttpServer {
         return false;
     }
 
-    //回复端
+    // 回复端
     private class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
         @Override
         protected void channelRead0(ChannelHandlerContext backendCtx, FullHttpResponse backendResponse) throws URISyntaxException {
-            logger.info("正在解析响应");
             // 获取关联的原始请求和剩余重试次数
             String requestId = backendCtx.channel().attr(REQUEST_ID_KEY).get();
-            logger.info("Received backend response for ID: {}  status : {}", requestId, backendResponse.status());
+            logger.info("正在解析响应 Received backend response for ID: {}  status : {}", requestId, backendResponse.status());
             RequestContext context = requestContextMap.computeIfPresent(requestId, (k, v) -> {
                 v.lastAccessTime = System.currentTimeMillis();
                 return v;
             });
+            // 这里的request已经被释放请求 无需在显式调用
             if (context != null) {
-                logger.info(context.getOriginalRequest().uri());
-                    try {
-                        circuitBreakerRecordMes(context,backendResponse);
-                    } catch (URISyntaxException e) {
-                        throw new RuntimeException(e);
+                try {
+                    circuitBreakerRecordMes(context, backendResponse);
+                    // 判断是否符合重试条件
+                    if (shouldRetry(backendResponse, context.getOriginalRequest())) {
+                        logger.info("响应符合重试条件 正在尝试重试");
+                        handleRetry(context.getFrontendCtx(), context.originalRequest, context.remainingRetries);
+                    } else {
+                        logger.info("响应成功 准备返回");
+                        forwardResponseToClient(context.getFrontendCtx(), backendResponse, backendCtx);// 正常响应转发
                     }
-                // 判断是否符合重试条件
-                if (shouldRetry(backendResponse, context.getOriginalRequest())) {
-                    logger.info("响应符合重试条件 正在尝试重试");
-                    handleRetry(context.getFrontendCtx(), context.originalRequest, context.remainingRetries);
-                } else {
-                    logger.info("响应成功 准备返回");
-                    forwardResponseToClient(context.getFrontendCtx(), backendResponse, backendCtx);// 正常响应转发
+                } catch (URISyntaxException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    // 响应处理完成后释放连接
+                    URI uri = new URI(context.getOriginalRequest().uri());
+                    InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
+                    FixedChannelPool pool = poolMap.get(inetSocketAddress);
+                    pool.release(backendCtx.channel());
                 }
             }
-            backendCtx.close();// 关闭后端连接
         }
 
         private boolean shouldRetry(FullHttpResponse response, FullHttpRequest request) {
@@ -553,9 +564,13 @@ public class AsyncNettyHttpServer {
             String requestId = backendCtx.channel().attr(REQUEST_ID_KEY).get();
             HttpUtil.setKeepAlive(clientResponse, requestContextMap.get(requestId).keepAlive);
 
-            CompletableFuture.runAsync(() ->
-                    requestContextMap.remove(requestId)
-            );
+            // 异步清理请求上下文和Channel属性
+            // 使用 Netty 的 EventLoop 执行清理
+            ctx.channel().eventLoop().execute(() -> {
+                requestContextMap.remove(requestId); // 移除全局缓存
+                ctx.channel().attr(REQUEST_ID_KEY).set(null);// 清理Channel属性
+            });
+
             // 处理分块传输
             if (HttpUtil.isTransferEncodingChunked(response)) {
                 HttpUtil.setTransferEncodingChunked(clientResponse, true);
@@ -563,13 +578,17 @@ public class AsyncNettyHttpServer {
                 clientResponse.headers()
                         .set(HttpHeaderNames.CONTENT_LENGTH, clientResponse.content().readableBytes());
             }
-            ctx.writeAndFlush(clientResponse);
-//                    .addListener(ChannelFutureListener.CLOSE); // 发送并关闭
+            // 发送响应并添加释放监听器
+            ctx.writeAndFlush(clientResponse).addListener(future -> {
+                if (!future.isSuccess()) {
+                    ReferenceCountUtil.safeRelease(clientResponse.content());
+                }
+            });
             logger.info("正在返回响应");
         }
     }
 
-    //发送失败响应给客户端
+    // 发送失败响应给客户端
     private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status) {
         // 构建JSON错误信息对象
         Map<String, Object> errorData = new HashMap<>();
@@ -584,6 +603,7 @@ public class AsyncNettyHttpServer {
             jsonResponse = "{\"error\":\"JSON序列化失败\"}";
             logger.error("JSON序列化异常", e);
         }
+        String requestId = ctx.channel().attr(REQUEST_ID_KEY).get();
         // 创建响应对象
         ByteBuf content = Unpooled.copiedBuffer(jsonResponse, CharsetUtil.UTF_8);
         FullHttpResponse response = new DefaultFullHttpResponse(
@@ -592,24 +612,31 @@ public class AsyncNettyHttpServer {
                 content  // 空内容，可根据需要填充错误信息
         );
 
+        // 异步清理请求上下文和Channel属性
+        // 使用 Netty 的 EventLoop 执行清理
+        ctx.channel().eventLoop().execute(() -> {
+            if (requestId != null) {
+                requestContextMap.remove(requestId); // 移除全局缓存
+                ctx.channel().attr(REQUEST_ID_KEY).set(null);// 清理Channel属性
+            }
+        });
+
         // 设置必要的响应头
         response.headers()
                 .set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8") // 必须包含charset
                 .set(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes())// 明确内容长度
                 .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);// Keep-Alive复用连接
-                /*
-                     关闭持久连接
-                    HTTP/1.1默认启用Keep-Alive长连接，允许复用同一TCP连接处理多个请求。
-                   设置Connection: close会覆盖默认行为，强制在响应结束后断开连接
-                .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
-                 */
+
 
         // 发送响应并关闭连接
-        ctx.writeAndFlush(response);
-        //.addListener(ChannelFutureListener.CLOSE);频繁建立连接会增加TCP握手开销
+        ctx.writeAndFlush(response).addListener(future -> {
+            if (!future.isSuccess()) {
+                ReferenceCountUtil.safeRelease(content);
+            }
+        });
     }
 
-    //从请求中获取userId
+    // 从请求中获取userId
     private String extractUserId(FullHttpRequest request) {
         return "1";
     }
@@ -647,6 +674,18 @@ public class AsyncNettyHttpServer {
         } else {
             Log.logger.info("熔断器记录成功次数");
             circuitBreaker.recordSuccess();
+        }
+    }
+
+    // 复制请求并保留引用计数
+    private FullHttpRequest copyAndRetainRequest(FullHttpRequest original) {
+        try {
+            FullHttpRequest copy = original.copy(); // 创建副本
+            copy.retain(); // 增加引用计数
+            return copy;
+        } catch (Exception e) {
+            logger.error("复制请求失败", e);
+            return null;
         }
     }
 

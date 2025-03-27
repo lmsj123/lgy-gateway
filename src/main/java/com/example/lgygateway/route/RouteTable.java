@@ -1,10 +1,10 @@
 package com.example.lgygateway.route;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
-import com.example.lgygateway.filters.models.FilterChain;
-import com.example.lgygateway.filters.models.FullContext;
+import com.example.lgygateway.model.filter.FilterChain;
+import com.example.lgygateway.model.filter.FullContext;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
-import com.example.lgygateway.route.model.value.RouteValue;
+import com.example.lgygateway.model.route.routeValue.RouteValue;
 import com.example.lgygateway.utils.Log;
 import io.netty.handler.codec.http.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,7 +26,7 @@ public class RouteTable {
     private RegistryFactory registryFactory;
     //遍历 ConcurrentHashMap 时若路由规则更新，可能读到中间状态。
     public FullHttpRequest matchRouteAsync(String url,FullHttpRequest request) throws URISyntaxException {
-        Log.logger.info("正在获取路由表");
+        Log.logger.info("正在获取路由表和相关路由属性");
         Map<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
         Map<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
         //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
@@ -35,7 +35,6 @@ public class RouteTable {
         for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
             //当查询到请求中符合网关转发规则
             if (url.contains(entry.getKey())) {
-                Log.logger.info("该路径 {} 存在于规则当中,正在判断是否符合其他条件",entry.getKey());
                 if (successFiltering(request,entry.getKey(),routeValues)) {
                     Log.logger.info("符合转发标准，正在获取实例");
                     //获取到服务实例
@@ -54,13 +53,9 @@ public class RouteTable {
                     Log.logger.info("转发路径为 {}", targetUrl);
                     //获取到对应的request准备发送
                     return createProxyRequest(request, targetUrl);
-                }else {
-                    Log.logger.info("该请求不符合转发标准 {}",url);
-                    return null;
                 }
             }
         }
-        Log.logger.info("该请求不符合转发标准 {}",url);
         return null;
     }
     private boolean successFiltering(FullHttpRequest request, String key, Map<String, RouteValue> routeValues) {

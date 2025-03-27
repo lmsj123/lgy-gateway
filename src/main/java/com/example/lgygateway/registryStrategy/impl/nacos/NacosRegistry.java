@@ -11,13 +11,13 @@ import com.alibaba.nacos.api.naming.listener.EventListener;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.NacosConfig;
 import com.example.lgygateway.filters.SPIFactory.SPIFilterFactory;
-import com.example.lgygateway.filters.models.FilterChain;
+import com.example.lgygateway.model.filter.FilterChain;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
 import com.example.lgygateway.loadStrategy.SPIFactory.SPILoadStrategyFactory;
 import com.example.lgygateway.registryStrategy.Registry;
-import com.example.lgygateway.route.model.ConfigModel.Filters;
-import com.example.lgygateway.route.model.ConfigModel.Route;
-import com.example.lgygateway.route.model.value.RouteValue;
+import com.example.lgygateway.model.route.routeConfig.Filters;
+import com.example.lgygateway.model.route.routeConfig.Route;
+import com.example.lgygateway.model.route.routeValue.RouteValue;
 import com.example.lgygateway.utils.Log;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -140,13 +140,13 @@ public class NacosRegistry implements Registry, DisposableBean {
                     .map(Route::getId)
                     .collect(Collectors.toSet());
 
-            Log.logger.info("正在获取被删除的路由");
             // 检测被删除的路由
             Set<String> deletedRoutes = existingRoutes.keySet().stream().parallel()
                     .filter(id -> !newRouteIds.contains(id))
                     .collect(Collectors.toSet());
 
             if (!deletedRoutes.isEmpty()) {
+                Log.logger.info("正在获取被删除的路由");
                 // 处理删除的路由
                 processDeletedRoutes(deletedRoutes);
             }

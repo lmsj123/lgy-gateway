@@ -1,6 +1,6 @@
-package com.example.lgygateway.route.model.value;
+package com.example.lgygateway.model.route.routeValue;
 
-import com.example.lgygateway.filters.models.FilterChain;
+import com.example.lgygateway.model.filter.FilterChain;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
 import lombok.Data;
 

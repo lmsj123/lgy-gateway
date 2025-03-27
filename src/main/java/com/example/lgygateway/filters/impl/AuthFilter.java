@@ -1,8 +1,8 @@
 package com.example.lgygateway.filters.impl;
 
 import com.example.lgygateway.filters.Filter;
-import com.example.lgygateway.filters.models.FilterChain;
-import com.example.lgygateway.filters.models.FullContext;
+import com.example.lgygateway.model.filter.FilterChain;
+import com.example.lgygateway.model.filter.FullContext;
 import com.example.lgygateway.utils.Log;
 import io.netty.handler.codec.http.*;
 

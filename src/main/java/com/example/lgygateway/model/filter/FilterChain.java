@@ -1,4 +1,4 @@
-package com.example.lgygateway.filters.models;
+package com.example.lgygateway.model.filter;
 
 import com.example.lgygateway.filters.Filter;
 import lombok.Getter;

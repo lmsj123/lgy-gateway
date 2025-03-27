@@ -1,12 +1,8 @@
 package com.example.lgygateway.filters.impl;
 
 import com.example.lgygateway.filters.Filter;
-import com.example.lgygateway.filters.models.FilterChain;
-import com.example.lgygateway.filters.models.FullContext;
-import io.netty.handler.codec.http.DefaultFullHttpResponse;
-import io.netty.handler.codec.http.FullHttpResponse;
-import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.handler.codec.http.HttpVersion;
+import com.example.lgygateway.model.filter.FilterChain;
+import com.example.lgygateway.model.filter.FullContext;
 import org.apache.curator.shaded.com.google.common.util.concurrent.RateLimiter;
 
 public class RateLimitFilter implements Filter {

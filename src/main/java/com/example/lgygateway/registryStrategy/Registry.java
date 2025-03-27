@@ -1,7 +1,7 @@
 package com.example.lgygateway.registryStrategy;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
-import com.example.lgygateway.route.model.value.RouteValue;
+import com.example.lgygateway.model.route.routeValue.RouteValue;
 
 import java.util.List;
 import java.util.Map;

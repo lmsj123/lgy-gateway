@@ -3,7 +3,7 @@ package com.example.lgygateway.registryStrategy.impl.zookeeper;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.ZookeeperConfig;
 import com.example.lgygateway.registryStrategy.Registry;
-import com.example.lgygateway.route.model.value.RouteValue;
+import com.example.lgygateway.model.route.routeValue.RouteValue;
 import org.apache.zookeeper.ZooKeeper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;

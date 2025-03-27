@@ -10,7 +10,7 @@ import com.alibaba.nacos.api.naming.listener.EventListener;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.config.NacosConfig;
 import com.example.lgygateway.registryStrategy.Registry;
-import com.example.lgygateway.route.model.value.RouteValue;
+import com.example.lgygateway.model.route.routeValue.RouteValue;
 import com.example.lgygateway.utils.Log;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;

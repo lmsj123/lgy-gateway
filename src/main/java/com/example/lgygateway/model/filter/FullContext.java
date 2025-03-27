@@ -1,4 +1,4 @@
-package com.example.lgygateway.filters.models;
+package com.example.lgygateway.model.filter;
 
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;

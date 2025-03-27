@@ -8,3 +8,158 @@
 8)性能测试 以及判断各个代码在多线程情况下是否存在线程不安全的情况
 9)nacosRegister 添加RouteData 重构类 调研如何增量更新（已完成）
 10)如何实现灰度发布问题
+一、性能测试（深度细化）
+极限吞吐量压测
+工具: JMeter + Prometheus + Grafana（监控服务器资源）
+场景:
+阶梯加压: 初始100并发，每5分钟增加200并发，直至达到2000并发。
+持续时长: 30分钟稳态运行。
+验证指标:
+吞吐量: 要求达到全局QPS上限（nettyConfig.getMaxQps()）的90%以上。
+响应时间: P99 < 200ms，平均响应时间 < 50ms。
+资源使用: CPU < 80%，内存无持续增长，无OOM。
+检查点:
+连接池复用率: 通过日志预热连接已释放和获取连接成功统计复用率是否>95%。
+限流生效日志: 当QPS超过阈值时，日志中该请求被限流出现频率与实际限流策略一致。
+熔断触发: 当后端服务模拟宕机时，熔断器日志熔断器记录失败次数是否快速触发熔断。
+连接池容量与超时测试
+工具: JMeter + 自定义脚本（模拟连接泄漏）
+场景:
+连接耗尽: 发送60并发请求（超过MAX_CONNECTIONS=50），持续10分钟。
+超时触发: 配置后端服务响应延迟为6秒（超过ACQUIRE_TIMEOUT_MS=5000）。
+验证指标:
+连接等待超时率: 超时错误（AcquireTimeoutException）比例应≈100%。
+连接释放: 通过Netty的ChannelPool监控，释放后连接数恢复至初始值。
+检查点:
+连接池日志: 是否出现ChannelHealthChecker主动回收失效连接。
+错误响应: 用户收到503 Service Unavailable（连接池满）或504 Gateway Timeout（后端超时）。
+熔断恢复与半开状态测试
+工具: JMeter + 模拟后端服务（故障注入）
+场景:
+熔断触发: 连续20次返回500错误，触发熔断器打开。
+半开探测: 熔断后5秒（配置的半开等待时间），发送1请求探测。
+恢复验证: 探测成功则后续请求恢复正常。
+验证指标:
+熔断器状态切换日志: CircuitBreaker state changed from CLOSED to OPEN。
+半开请求成功率: 探测请求必须成功，否则熔断器保持打开。
+检查点:
+请求失败时，handleSendError是否触发重试策略。
+熔断恢复后，recordSuccess日志频率是否符合预期。
+二、线程安全测试（详细场景）
+ConcurrentHashMap并发读写测试
+工具: JUnit + 多线程模拟
+场景:
+写入竞争: 100线程并发写入requestContextMap，每个线程生成1000个唯一requestId。
+读取清理: 同时启动定时任务线程调用deleteOutTime清理超时请求。
+验证指标:
+数据一致性: 最终requestContextMap中无残留未清理的请求。
+异常检测: 无ConcurrentModificationException或内存泄漏（通过VisualVM分析）。
+检查点:
+清理任务日志: deleteOutTime每5分钟执行一次，清理数量与实际超时请求一致。
+请求上下文生命周期: 每个requestId在5分钟后被自动清除。
+熔断器状态竞态测试
+工具: JMeter + 多线程触发熔断器
+场景:
+并发失败请求: 50线程同时发送请求至同一熔断器保护的后端服务（返回500）。
+状态切换验证: 当失败次数达到阈值时，检查熔断器状态是否原子切换。
+验证指标:
+熔断器日志: 状态切换仅发生一次，无重复切换。
+请求拦截率: 熔断打开后，所有新请求直接被拒绝（无穿透）。
+检查点:
+使用circuitBreakers.get(inetSocketAddress).getState()验证状态一致性。
+日志中无CircuitBreaker状态翻转的竞态警告。
+三、功能覆盖测试（全路径覆盖）
+路由与限流组合测试
+工具: APIFox + 动态路由配置
+场景:
+路由匹配:
+合法路径/api/v1/user返回200，且后端服务日志确认请求到达。
+非法路径/invalid返回404，且日志路由匹配失败。
+多级限流:
+全局QPS限制: 配置maxQps=100，发送120请求/秒，验证限流比例≈20%。
+用户级限流: 模拟同一用户（userId=1）高频请求，触发该用户被限流。
+游客限流: 不带userId的请求，触发游客被限流。
+检查点:
+限流计数器: SlidingWindowCounter统计值与实际请求数一致。
+令牌桶日志: TokenBucket.tryAcquire失败次数与限流响应匹配。
+熔断器全状态流转测试
+工具: APIFox + 故障注入（返回500/超时）
+场景:
+关闭→打开: 连续失败次数超过阈值，熔断器打开，新请求直接拒绝。
+打开→半开: 等待熔断恢复时间后，发送探测请求。
+半开→关闭: 探测成功，后续请求恢复正常。
+半开→打开: 探测失败，熔断器保持打开。
+验证指标:
+状态切换日志: 符合熔断器配置的阈值和超时时间。
+探测请求: 仅允许1个请求通过，用于验证后端恢复。
+检查点:
+熔断器配置参数: failureRateThreshold=50%, waitDurationInOpenState=5s是否生效。
+四、边界与异常测试（极端场景）
+大请求体处理
+工具: JMeter + 自定义脚本生成10MB请求体
+场景:
+发送POST请求，Body大小为10MB（HttpObjectAggregator配置上限）。
+发送11MB请求体，触发TooLongFrameException。
+验证指标:
+10MB请求: 返回200，后端服务接收完整数据。
+11MB请求: 返回413（Payload Too Large），且日志记录异常。
+检查点:
+内存占用: 大请求处理期间，JVM堆内存无溢出。
+请求释放: ReferenceCountUtil.safeRelease确保内存回收。
+重试策略验证
+工具: JMeter + 模拟后端部分失败
+场景:
+指数退避: 配置retries=3，验证重试间隔是否为1s±500ms、2s±500ms、4s±500ms。
+非幂等请求: 发送POST请求并触发重试，验证后端是否仅处理一次。
+检查点:
+重试日志: 正在重试 重试次数还剩余 2等日志符合预期。
+请求去重: 后端服务日志确认POST请求未被重复执行。
+五、工具配置与执行细节
+JMeter配置模板
+线程组:
+ 线程数: 1000
+Ramp-Up: 60秒
+循环次数: 永久
+HTTP请求:
+ 协议: HTTP/1.1
+方法: GET
+Path: /api/v1/test
+连接超时: 5000ms
+响应超时: 30000ms
+监听器:
+Aggregate Report: 统计TPS、响应时间、错误率。
+Response Times Over Time: 可视化响应时间趋势。
+APIFox自动化测试流程
+测试集合:
+预置环境变量: base_url, auth_token。
+测试步骤:
+发送OPTIONS请求，验证CORS头。
+发送合法/非法路由请求，验证404/200。
+触发熔断器并验证状态码503→200。
+断言配置:
+Json
+// 验证CORS头
+pm.test("CORS headers present", function() {
+    pm.response.to.have.header("Access-Control-Allow-Origin", "*");
+});
+日志监控与分析
+关键日志过滤:
+Bash
+# 限流触发
+grep "该请求被限流" gateway.log
+# 熔断器状态变更
+grep "CircuitBreaker state changed" gateway.log
+# 连接池操作
+grep "获取连接成功\|预热连接" gateway.log
+ELK配置: 使用Logstash解析日志，Kibana展示实时仪表盘。
+六、测试报告输出
+性能报告:
+吞吐量、响应时间、错误率的折线图对比。
+资源使用率（CPU、内存、网络IO）。
+线程安全报告:
+并发测试中数据结构的最终状态一致性。
+竞态条件检测结果（如有无锁竞争警告）。
+功能覆盖报告:
+路由、限流、熔断的路径覆盖率和通过率。
+边界条件测试的通过情况。
+通过以上详尽的测试用例，可确保网关在高并发、异常场景下的稳定性和功能完备性，同时为性能调优提供数据支撑。

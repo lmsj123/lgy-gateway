@@ -25,6 +25,7 @@ circuit-breaker:
   halfOpenSuccessThreshold: 3
   counterResetThreshold: 1000
 
+
 #配置netty所监听的端口
 netty:
   port: 10001

@@ -1,13 +1,11 @@
 package com.example.lgygateway.route;
 
 import com.alibaba.nacos.api.naming.pojo.Instance;
-import lombok.AllArgsConstructor;
 import lombok.Data;
 
 import java.util.*;
 
-import static org.apache.curator.framework.imps.ProtectedUtils.normalizePath;
-
+@Data
 public class PathTrie {
     public static void main(String[] args) {
         PathTrie trie = new PathTrie();
@@ -55,8 +53,14 @@ public class PathTrie {
         trie.insert("/python/apis/*", arrayList4); // 新增单层规则
         trie.insert("/python/apis/**", arrayList5); // 新增多层规则
         trie.insert("/", arrayList6);// 插入根路径规则
-
-        List<Instance> search = trie.search("/python/apis/v1");
+//        List<Instance> search = trie.searchPathTrie("/python/apis/v1").instances;
+//        List<Instance> search = trie.searchPathTrie("/python/apis").instances;
+//        List<Instance> search = trie.searchPathTrie("/python/apis/v1/data").instances;
+//        List<Instance> search = trie.searchPathTrie("/python/apis/new").instances;
+//        List<Instance> search = trie.searchPathTrie("/").instances;
+//        List<Instance> search = trie.searchPathTrie("/python/a/b/c/d/e/f").instances;
+//        List<Instance> search = trie.searchPathTrie("").instances;
+        List<Instance> search = trie.searchPathTrie("/unknown").instances;
         System.out.println(Arrays.toString(search.toArray()));
         // 验证匹配
     }
@@ -118,43 +122,47 @@ public class PathTrie {
         }
         return pathTrie.instances;
     }
-    public List<Instance> searchPathTrie(String url) {
+    public PathTrie searchPathTrie(String url) {
+        if (url.isEmpty()) {
+            return new PathTrie();
+        }
         String[] parts = url.split("/");
         PathTrie pathTrie = this;
-        List<Instance> list = new ArrayList<>();
+        PathTrie trie = new PathTrie();
         for (int i = 1; i < parts.length; i++) {
             // 得到与当前路径最近的 ** 对应的服务实例
             if (pathTrie.children.containsKey("**")) {
-                list = pathTrie.children.get("**").instances;
+                trie = pathTrie.children.get("**");
             }
             if (pathTrie.children.containsKey(parts[i])) {
                 // 得到平级 * 对应的实例
-                List<Instance> instanceList = new ArrayList<>();
+                PathTrie pre = new PathTrie();
                 if (pathTrie.children.containsKey("*")) {
-                    instanceList = pathTrie.children.get("*").instances;
+                    pre = pathTrie.children.get("*");
                 }
                 pathTrie = pathTrie.children.get(parts[i]);
                 // 如果出现了路由规则存在 /xxxx/y/z 而 实际为/xxxx/y
                 if (i == parts.length - 1 && pathTrie.instances.isEmpty()) {
                     // 优先级为 /xxxx/* -> /xxxx/y/** -> /xxxx/**
-                    if (!instanceList.isEmpty()) {
-                        return instanceList;
+                    if (!pre.instances.isEmpty()) {
+                        return pre;
                     } else if (pathTrie.children.containsKey("**")) {
-                        return pathTrie.children.get("**").instances;
+                        return pathTrie.children.get("**");
                     } else {
-                        return list;
+                        return trie;
                     }
                 }
             } else if (pathTrie.children.containsKey("*")) {
                 if (i == parts.length - 1) {
-                    return pathTrie.children.get("*").instances;
+                    return pathTrie.children.get("*");
                 }
+                return trie;
             } else if (pathTrie.children.containsKey("**")) {
-                return pathTrie.children.get("**").instances;
+                return pathTrie.children.get("**");
             } else {
-                return list;
+                return trie;
             }
         }
-        return pathTrie.instances;
+        return pathTrie;
     }
 }

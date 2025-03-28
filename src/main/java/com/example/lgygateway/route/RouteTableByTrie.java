@@ -5,7 +5,6 @@ import com.example.lgygateway.model.filter.FilterChain;
 import com.example.lgygateway.model.filter.FullContext;
 import com.example.lgygateway.model.route.routeValue.RouteValue;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
-import com.example.lgygateway.route.PathTrie;
 import com.example.lgygateway.utils.Log;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
@@ -36,18 +35,19 @@ public class RouteTableByTrie {
         PathTrie pathTrie = new PathTrie();
         routeRules.forEach(pathTrie::insert);
         String[] split = url.split("\\?");
-        List<Instance> instances = pathTrie.search(split[0]);
-        if (!instances.isEmpty()){
-                Log.logger.info("该路径 {} 存在对应的路由 正在得到实例", url);
-                //根据定义的负载均衡策略选择一个服务作为转发ip
-                RouteValue routeValue = routeValues.get(pattern);
-                Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(instances);
-                //示例： http://localhost/xxxx/api -> http://instance/api
-                //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
-                String targetUrl = buildTargetUrl(url, pattern, selectedInstance);
-                Log.logger.info("转发路径为 {}", targetUrl);
-                return createProxyRequest(request, targetUrl);
-            }
+        PathTrie trie = pathTrie.searchPathTrie(split[0]);
+        if (!trie.getInstances().isEmpty()) {
+            String path = trie.getFinalPath();
+            Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, path);
+            //根据定义的负载均衡策略选择一个服务作为转发ip
+            RouteValue routeValue = routeValues.get(path);
+            Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(trie.getInstances());
+            //示例： http://localhost/xxxx/api -> http://instance/api
+            //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
+            String targetUrl = buildTargetUrl(url, path, selectedInstance);
+            Log.logger.info("转发路径为 {}", targetUrl);
+            return createProxyRequest(request, targetUrl);
+        }
         return null;
     }
 
@@ -86,4 +86,20 @@ public class RouteTableByTrie {
         Log.logger.info("创建新请求完成");
         return newRequest;
     }
+
+    private String buildTargetUrl(String originalUrl, String matchedPattern, Instance instance) {
+        // 分离路径和查询参数
+        String path = originalUrl.split("\\?")[0];
+        String query = originalUrl.contains("?") ? originalUrl.split("\\?")[1] : "";
+
+        // 提取动态路径部分（如 /python/cr_data_backflow/... → cr_data_backflow/...）
+        String backendPath = path.replaceFirst(matchedPattern.replace("**", ""), "");
+        // 确保路径以斜杠开头
+        if (!backendPath.startsWith("/")) {
+            backendPath = "/" + backendPath;
+        }
+        return "http://" + instance.getIp() + ":" + instance.getPort()
+                + backendPath + (query.isEmpty() ? "" : "?" + query);
+    }
+}
 

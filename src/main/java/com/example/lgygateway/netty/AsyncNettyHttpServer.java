@@ -8,7 +8,7 @@ import com.example.lgygateway.limit.SlidingWindowCounter;
 import com.example.lgygateway.limit.TokenBucket;
 import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
-import com.example.lgygateway.route.RouteTableByTraverse;
+import com.example.lgygateway.route.RouteTableByTrie;
 import com.example.lgygateway.utils.Log;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
@@ -60,7 +60,7 @@ public class AsyncNettyHttpServer {
     @Autowired
     private CircuitBreakerConfig circuitBreakerConfig;
     @Autowired
-    private RouteTableByTraverse routeTable; // 动态路由表
+    private RouteTableByTrie routeTable; // 动态路由表
     // 定义全局的请求上下文缓存（线程安全）
     private static final ConcurrentHashMap<String, RequestContext> requestContextMap = new ConcurrentHashMap<>();
     // 初始化连接池

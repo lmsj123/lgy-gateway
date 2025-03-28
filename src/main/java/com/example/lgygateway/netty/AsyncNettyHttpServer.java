@@ -85,12 +85,6 @@ public class AsyncNettyHttpServer {
 
     // 自定义ChannelPoolHandler
     class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
-
-        @Override
-        public void channelAcquired(Channel ch) {
-
-        }
-
         @Override
         public void channelCreated(Channel ch) {
             // 初始化Channel的Pipeline（与客户端Bootstrap配置一致）
@@ -98,10 +92,6 @@ public class AsyncNettyHttpServer {
                     .addLast(new HttpClientCodec()) // 客户端应使用HttpClientCodec
                     .addLast(new HttpObjectAggregator(65536))
                     .addLast(new BackendHandler());
-        }
-
-        @Override
-        public void channelReleased(Channel ch) {
         }
     }
 
@@ -172,6 +162,7 @@ public class AsyncNettyHttpServer {
         deleteOutTime();
     }
 
+    //定时任务删除缓存
     private void deleteOutTime() {
         Executors.newSingleThreadScheduledExecutor()
                 .scheduleAtFixedRate(() -> {
@@ -180,12 +171,15 @@ public class AsyncNettyHttpServer {
                         Map.Entry<String, RequestContext> entry = it.next();
                         if (System.currentTimeMillis() - entry.getValue().getLastAccessTime() > 300_000) { // 5分钟
                             it.remove();
-                            entry.getValue().getOriginalRequest().release(); // 释放缓冲区
+                            if (entry.getValue().getOriginalRequest().refCnt() > 0) {
+                                entry.getValue().getOriginalRequest().release();
+                            }
                         }
                     }
                 }, 5, 5, TimeUnit.MINUTES);
     }
 
+    //初始化响应端
     private void initializeClientBootstrap() {
         // [线程组绑定]
         clientBootstrap.group(clientGroup) // 绑定NioEventLoopGroup线程组，用于处理IO事件
@@ -272,7 +266,7 @@ public class AsyncNettyHttpServer {
 
     }
 
-    //发送端
+    // 发送端
     private class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
         //SimpleChannelInboundHandler 在 channelRead0 方法执行完毕后会自动调用 ReferenceCountUtil.release(msg)，因此无需手动释放请求对象。
         @Override
@@ -312,7 +306,7 @@ public class AsyncNettyHttpServer {
         }
     }
 
-    //使用了连接池长连接 避免每次都进行tcp连接
+    // 使用了连接池长连接 避免每次都进行tcp连接
     private void forwardRequestWithRetry(ChannelHandlerContext ctx, FullHttpRequest request, int retries) {
         URI uri = null;
         try {
@@ -436,6 +430,7 @@ public class AsyncNettyHttpServer {
             sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
         }
     }
+
     // 这里重试请求是需要拷贝副本的
     private void handleRetry(ChannelHandlerContext ctx, FullHttpRequest request, Integer retries) throws URISyntaxException {
         logger.warn("Retrying request to {} (remaining {} retries)", request.uri(), retries);
@@ -449,7 +444,7 @@ public class AsyncNettyHttpServer {
             }
             if (limit(ctx, copiedRequest)) {
                 logger.info("该请求被限流 释放副本请求");
-                ReferenceCountUtil.safeRelease(request);
+                ReferenceCountUtil.safeRelease(copiedRequest);
                 return;
             }
             URI uri = new URI(request.uri());

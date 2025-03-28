@@ -14,9 +14,12 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
+
 // TODO：1) 当前路由规则很简单 当请求路径包含/xxxx/就符合 后续应该优化复杂一些 比如/xxxx/* 代码/xxxx/后只允许一个参数 /xxxx/** 表示有无均可
 //       2) 路由匹配算法优化 现在方法为contains且是遍历map 时间复杂度为O(n) 需要进行相关的优化
 @Component
@@ -24,40 +27,45 @@ public class RouteTable {
 
     @Autowired
     private RegistryFactory registryFactory;
+
     //遍历 ConcurrentHashMap 时若路由规则更新，可能读到中间状态。
-    public FullHttpRequest matchRouteAsync(String url,FullHttpRequest request) throws URISyntaxException {
+    public FullHttpRequest matchRouteAsync(String url, FullHttpRequest request) throws URISyntaxException {
         Log.logger.info("正在获取路由表和相关路由属性");
         Map<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
         Map<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
-        //由于ConcurrentHashMap并不能很好的支持原子性操作 后续会进行优化
-        //也会对后续匹配进行优化
-        Log.logger.info("正在判断该请求是否符合转发标准 {}",url);
-        for (ConcurrentHashMap.Entry<String, List<Instance>> entry : routeRules.entrySet()) {
-            //当查询到请求中符合网关转发规则
-            if (url.contains(entry.getKey())) {
-                if (successFiltering(request,entry.getKey(),routeValues)) {
-                    Log.logger.info("符合转发标准，正在获取实例");
-                    //获取到服务实例
-                    List<Instance> instances = entry.getValue();
+
+        // 按优先级排序路由规则
+        List<String> sortedPatterns = routeRules.keySet().stream()
+                .sorted(this::compareRouteSpecificity)
+                .toList();
+
+        for (String pattern : sortedPatterns) {
+            // 转换为正则表达式
+            String regex = convertToRegex(pattern);
+            Pattern compiledPattern = Pattern.compile(regex);
+            Matcher matcher = compiledPattern.matcher(url);
+            if (matcher.matches()) {
+                if (successFiltering(request, pattern, routeValues)) {
+                    Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, pattern);
+                    List<Instance> instances = routeRules.get(pattern);
                     if (instances.isEmpty()) {
                         Log.logger.info("不存在对应实例");
                         return null;
                     }
                     //根据定义的负载均衡策略选择一个服务作为转发ip
-                    RouteValue routeValue = routeValues.get(entry.getKey());
+                    RouteValue routeValue = routeValues.get(pattern);
                     Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(instances);
                     //示例： http://localhost/xxxx/api -> http://instance/api
                     //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
-                    String backendPath = url.replace(entry.getKey(), "");
-                    String targetUrl = "http://" + selectedInstance.getIp() + ":" + selectedInstance.getPort() + "/" + backendPath;
+                    String targetUrl = buildTargetUrl(url, pattern, selectedInstance);
                     Log.logger.info("转发路径为 {}", targetUrl);
-                    //获取到对应的request准备发送
                     return createProxyRequest(request, targetUrl);
                 }
             }
         }
         return null;
     }
+
     private boolean successFiltering(FullHttpRequest request, String key, Map<String, RouteValue> routeValues) {
         RouteValue routeValue = routeValues.get(key);
         if (routeValue.getMethod().equals("ALL") || routeValue.getMethod().equalsIgnoreCase(String.valueOf(request.method()))) {
@@ -73,6 +81,7 @@ public class RouteTable {
         }
         return false;
     }
+
     // 根据原始请求创建新的HTTP请求对象
     private FullHttpRequest createProxyRequest(FullHttpRequest original, String targetUrl) throws URISyntaxException {
         URI uri = new URI(targetUrl);
@@ -93,4 +102,80 @@ public class RouteTable {
         return newRequest;
     }
 
+    //将 Ant 风格通配符转换为正则表达式
+    private String convertToRegex(String pattern) {
+        // /python/.*
+        // 步骤1: 将 ** 替换为临时标记
+        String tempMarker = UUID.randomUUID().toString();
+        String temp = pattern.replace("**", tempMarker);
+        // 步骤2: 处理其他转义和替换
+        String regex = temp
+                .replace(".", "\\.")
+                .replace("*", "[^/]*");
+        // 步骤3: 将临时标记替换为 .*
+        regex = regex.replace(tempMarker, ".*");
+        return "^" + regex + "(\\?.*)?$";
+    }
+
+    //通配符数量和路径长度进行综合排序
+    private int compareRouteSpecificity(String a, String b) {
+        // 1. 优先比较通配符数量
+        int wildcardCompare = Integer.compare(countWildcards(a), countWildcards(b));
+        if (wildcardCompare != 0) {
+            return wildcardCompare; // 通配符少的优先级高
+        }
+        // 2. 通配符数量相同，则路径更长的优先级高
+        return Integer.compare(b.length(), a.length());
+    }
+
+    //场景假设：
+    //    假设有以下路由规则：
+    //     /api/test → 通配符数 0，长度 9
+    //     /api/* → 通配符数 1，长度 6
+    //     /api/** → 通配符数 2，长度 7
+    //     /api/*/detail → 通配符数 1，长度 12
+    //    排序结果
+    //     /api/test（通配符最少）
+    //     /api/*/detail（通配符相同，但路径更长）
+    //     /api/*（通配符相同，路径更短）
+    //     /api/**（通配符最多）
+    private int countWildcards(String pattern) {
+        int count = 0;
+        // 遍历字符串，匹配通配符
+        for (int i = 0; i < pattern.length(); i++) {
+            if (pattern.charAt(i) == '*') {
+                // 检查是否是 **（连续两个 *）
+                if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '*') {
+                    count += 2;  // ** 视为更高优先级（或更低权重）
+                    i++;         // 跳过下一个 *
+                } else {
+                    count += 1;  // * 视为单层通配符
+                }
+            }
+        }
+        return count;
+    }
+
+    private String buildTargetUrl(String originalUrl, String matchedPattern, Instance instance) {
+        // 分离路径和查询参数
+        String path = originalUrl.split("\\?")[0];
+        String query = originalUrl.contains("?") ? originalUrl.split("\\?")[1] : "";
+
+        // 生成正则表达式并验证完整匹配
+        String regexPattern = convertToRegex(matchedPattern);
+        Pattern pattern = Pattern.compile(regexPattern);
+        Matcher matcher = pattern.matcher(path);
+
+        if (matcher.matches()) {  // 使用 matches() 确保完整匹配
+            // 提取动态路径部分（如 /python/cr_data_backflow/... → cr_data_backflow/...）
+            String backendPath = path.replaceFirst(matchedPattern.replace("**", ""), "");
+            // 确保路径以斜杠开头
+            if (!backendPath.startsWith("/")) {
+                backendPath = "/" + backendPath;
+            }
+            return "http://" + instance.getIp() + ":" + instance.getPort()
+                    + backendPath + (query.isEmpty() ? "" : "?" + query);
+        }
+        throw new IllegalArgumentException("URL does not match the pattern: " + matchedPattern);
+    }
 }

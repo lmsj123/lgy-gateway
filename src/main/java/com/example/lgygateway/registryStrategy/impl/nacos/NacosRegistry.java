@@ -58,7 +58,7 @@ public class NacosRegistry implements Registry, DisposableBean {
 
     @Autowired
     private NacosConfig nacosConfig;
-    // 已订阅的服务名集合（防止重复订阅）service -> listener
+    // 已订阅的服务名集合（防止重复订阅）serviceName -> listener
     private final ConcurrentHashMap<String, InstanceChangeListener> subscribedServices = new ConcurrentHashMap<>();
     // 已存在的路由 用于判断是否增量或者全量更新 id -> route
     private final ConcurrentHashMap<String, Route> existingRoutes = new ConcurrentHashMap<>();
@@ -196,13 +196,13 @@ public class NacosRegistry implements Registry, DisposableBean {
                                 try {
                                     InstanceChangeListener listener = new InstanceChangeListener(k);
                                     namingService.subscribe(k, listener);
-                                    Log.logger.info("{} 服务的监听器已订阅 {} 路径", k, path);
                                     return listener;
                                 } catch (NacosException e) {
                                     Log.logger.error("订阅失败: {}", k, e);
                                     throw new CompletionException(e);
                                 }
                             }).addPath(path); // 向已有监听器添加新路径
+                            Log.logger.info("{} 服务的监听器已订阅 {} 路径", serviceName, path);
                         } catch (NacosException e) {
                             throw new RuntimeException("无法获取服务实例: " + serviceName, e);
                         }
@@ -284,7 +284,6 @@ public class NacosRegistry implements Registry, DisposableBean {
         load.forEach(spiLoadStrategyFactories::add);
         return Collections.unmodifiableList(spiLoadStrategyFactories);
     }
-
     private LoadBalancerStrategy getMatchedLoadBalancer(String loadBalancer) {
         List<SPILoadStrategyFactory> list = loadAllLoadBalancers().stream()
                 .filter(loadBalancerStrategy
@@ -302,7 +301,6 @@ public class NacosRegistry implements Registry, DisposableBean {
         loader.forEach(spiFilterFactories::add);
         return Collections.unmodifiableList(spiFilterFactories);
     }
-
     private FilterChain getMatchedFilters(List<String> filterNames) {
         List<SPIFilterFactory> filterFactories = loadAllFilters().stream()
                 .filter(filter -> filterNames.contains(filter.getType()))

@@ -51,4 +51,12 @@ class LgyGatewayApplicationTests {
         }
         throw new IllegalArgumentException("URL does not match the pattern: " + matchedPattern);
     }
+    /*
+       /python/123/*  /python/**   /xxxx/** /yyyy/**
+      python -> 123,** -> **
+
+
+    /python/123/456
+
+     */
 }

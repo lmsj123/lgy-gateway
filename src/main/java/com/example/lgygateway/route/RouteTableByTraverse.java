@@ -3,10 +3,13 @@ package com.example.lgygateway.route;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.model.filter.FilterChain;
 import com.example.lgygateway.model.filter.FullContext;
-import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
 import com.example.lgygateway.model.route.routeValue.RouteValue;
+import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
 import com.example.lgygateway.utils.Log;
-import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -23,7 +26,7 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 // TODO：1) 当前路由规则很简单 当请求路径包含/xxxx/就符合 后续应该优化复杂一些 比如/xxxx/* 代码/xxxx/后只允许一个参数 /xxxx/** 表示有无均可
 //       2) 路由匹配算法优化 现在方法为contains且是遍历map 时间复杂度为O(n) 需要进行相关的优化
 @Component
-public class RouteTable {
+public class RouteTableByTraverse {
 
     @Autowired
     private RegistryFactory registryFactory;

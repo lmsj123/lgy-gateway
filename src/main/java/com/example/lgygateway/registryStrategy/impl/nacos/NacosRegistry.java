@@ -29,12 +29,13 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.yaml.snakeyaml.Yaml;
 
+import java.lang.ref.SoftReference;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
-//TODO 1) SPI相关的缓存策略 现在策略是每次配置文件更新时都会通过SPI机制加载相对应的实例 后续可以通过本地缓存或者Redis进行优化判断
+//TODO 1) SPI相关的缓存策略 现在策略是每次配置文件更新时都会通过SPI机制加载相对应的实例 后续可以通过本地缓存或者Redis进行优化判断（完成简单缓存）
 //     2) 对对应的路由规则添加版本号，后续可支持灰度发布和回滚
 @Component("nacos")
 @Lazy
@@ -278,11 +279,22 @@ public class NacosRegistry implements Registry, DisposableBean {
     }
 
     //预先加载所有 LoadServer 实现
+    private static volatile SoftReference<List<SPILoadStrategyFactory>> loadCacheRef;
+    private static final ScheduledExecutorService loadScheduler = Executors.newSingleThreadScheduledExecutor();
     private static List<SPILoadStrategyFactory> loadAllLoadBalancers() {
-        ServiceLoader<SPILoadStrategyFactory> load = ServiceLoader.load(SPILoadStrategyFactory.class);
-        ArrayList<SPILoadStrategyFactory> spiLoadStrategyFactories = new ArrayList<>();
-        load.forEach(spiLoadStrategyFactories::add);
-        return Collections.unmodifiableList(spiLoadStrategyFactories);
+        List<SPILoadStrategyFactory> list = loadCacheRef != null ? loadCacheRef.get() : null;
+        if (list == null) {
+            synchronized (SPILoadStrategyFactory.class) {
+                list = loadCacheRef != null ? loadCacheRef.get() : null;
+                if (list == null) {
+                    ServiceLoader<SPILoadStrategyFactory> load = ServiceLoader.load(SPILoadStrategyFactory.class);
+                    list = new ArrayList<>();
+                    load.forEach(list::add);
+                    loadCacheRef = new SoftReference<>(list);
+                }
+            }
+        }
+        return list;
     }
     private LoadBalancerStrategy getMatchedLoadBalancer(String loadBalancer) {
         List<SPILoadStrategyFactory> list = loadAllLoadBalancers().stream()
@@ -295,11 +307,27 @@ public class NacosRegistry implements Registry, DisposableBean {
     }
 
     // 预先加载所有 Filter 实现
+    // 这里使用的是缓存加定时更新这样的方案 适用于对于实时性不高 后续可实现一个接口清空缓存便可以重新加载
+    private static volatile SoftReference<List<SPIFilterFactory>> filterCacheRef;
+    private static final ScheduledExecutorService filterScheduler = Executors.newSingleThreadScheduledExecutor();
+    static {
+        filterScheduler.scheduleAtFixedRate(() -> filterCacheRef = null, 1, 1, TimeUnit.HOURS); // 每小时刷新
+        loadScheduler.scheduleAtFixedRate(() -> loadCacheRef = null, 1, 1, TimeUnit.HOURS);
+    }
     private static List<SPIFilterFactory> loadAllFilters() {
-        ServiceLoader<SPIFilterFactory> loader = ServiceLoader.load(SPIFilterFactory.class);
-        List<SPIFilterFactory> spiFilterFactories = new ArrayList<>();
-        loader.forEach(spiFilterFactories::add);
-        return Collections.unmodifiableList(spiFilterFactories);
+        List<SPIFilterFactory> list = filterCacheRef != null ? filterCacheRef.get() : null;
+        if (list == null) {
+            synchronized (SPIFilterFactory.class) {
+                list = filterCacheRef != null ? filterCacheRef.get() : null;
+                if (list == null) {
+                    ServiceLoader<SPIFilterFactory> loader = ServiceLoader.load(SPIFilterFactory.class);
+                    list = new ArrayList<>();
+                    loader.forEach(list::add);
+                    filterCacheRef = new SoftReference<>(list);
+                }
+            }
+        }
+        return list;
     }
     private FilterChain getMatchedFilters(List<String> filterNames) {
         List<SPIFilterFactory> filterFactories = loadAllFilters().stream()

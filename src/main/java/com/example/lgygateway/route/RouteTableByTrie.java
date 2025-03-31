@@ -38,15 +38,17 @@ public class RouteTableByTrie {
         PathTrie trie = pathTrie.searchPathTrie(split[0]);
         if (!trie.getInstances().isEmpty()) {
             String path = trie.getFinalPath();
-            Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, path);
-            //根据定义的负载均衡策略选择一个服务作为转发ip
-            RouteValue routeValue = routeValues.get(path);
-            Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(trie.getInstances());
-            //示例： http://localhost/xxxx/api -> http://instance/api
-            //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
-            String targetUrl = buildTargetUrl(url, path, selectedInstance);
-            Log.logger.info("转发路径为 {}", targetUrl);
-            return createProxyRequest(request, targetUrl);
+            if (successFiltering(request,path,routeValues)) {
+                Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, path);
+                //根据定义的负载均衡策略选择一个服务作为转发ip
+                RouteValue routeValue = routeValues.get(path);
+                Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(trie.getInstances());
+                //示例： http://localhost/xxxx/api -> http://instance/api
+                //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
+                String targetUrl = buildTargetUrl(url, path, selectedInstance);
+                Log.logger.info("转发路径为 {}", targetUrl);
+                return createProxyRequest(request, targetUrl);
+            }
         }
         return null;
     }

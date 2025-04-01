@@ -42,12 +42,12 @@ import java.util.stream.Collectors;
 public class NacosRegistry implements Registry, DisposableBean {
     //rules: path -> instances
     //values: path -> RouteValue
-    record RouteData(Map<String, List<Instance>> rules, Map<String, RouteValue> values) {}
+    record RouteData(ConcurrentHashMap<String, List<Instance>> rules, ConcurrentHashMap<String, RouteValue> values) {}
 
     // 存储路由
     // 使用原子引用+副本策略保证路由更新原子性
     private final AtomicReference<RouteData> routeDataRef =
-            new AtomicReference<>(new RouteData(new HashMap<>(), new HashMap<>()));
+            new AtomicReference<>(new RouteData(new ConcurrentHashMap<>(), new ConcurrentHashMap<>()));
 
     public Map<String, List<Instance>> getRouteRules() {
         return Collections.unmodifiableMap(routeDataRef.get().rules);
@@ -215,8 +215,8 @@ public class NacosRegistry implements Registry, DisposableBean {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
             // 清空旧路由规则并更新
             routeDataRef.getAndUpdate(current -> {
-                Map<String, List<Instance>> mergedRules = new HashMap<>(current.rules);
-                Map<String, RouteValue> mergedValues = new HashMap<>(current.values);
+                ConcurrentHashMap<String, List<Instance>> mergedRules = new ConcurrentHashMap<>(current.rules);
+                ConcurrentHashMap<String, RouteValue> mergedValues = new ConcurrentHashMap<>(current.values);
 
                 // 仅更新发生变化的部分
                 mergedRules.putAll(rules);
@@ -239,8 +239,8 @@ public class NacosRegistry implements Registry, DisposableBean {
             Log.logger.info("被删除的路径为 {}", path);
             // 从路由数据中移除
             routeDataRef.getAndUpdate(current -> {
-                Map<String, List<Instance>> newRules = new HashMap<>(current.rules);
-                Map<String, RouteValue> newValues = new HashMap<>(current.values);
+                ConcurrentHashMap<String, List<Instance>> newRules = new ConcurrentHashMap<>(current.rules);
+                ConcurrentHashMap<String, RouteValue> newValues = new ConcurrentHashMap<>(current.values);
                 newRules.remove(path);
                 newValues.remove(path);
                 return new RouteData(newRules, newValues);
@@ -359,7 +359,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                 // 遍历所有关联路径进行更新
                 boundPaths.keySet().forEach(path ->
                         routeDataRef.updateAndGet(current -> {
-                            Map<String, List<Instance>> newRules = new HashMap<>(current.rules);
+                            ConcurrentHashMap<String, List<Instance>> newRules = new ConcurrentHashMap<>(current.rules);
                             if (newInstances.isEmpty()) {
                                 Log.logger.info("正在删除 {} 服务", serviceName);
                                 newRules.remove(path);

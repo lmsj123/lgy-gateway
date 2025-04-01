@@ -52,7 +52,7 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 //     2)后续可以添加熔断机制，快速失败（已完成）
 //     3)后续将相关配置优化为可动态调整
 //     4)后续优化成可以适配https等
-@Component
+@Component("test")
 public class AsyncNettyHttpServer {
     private static final Logger logger = LoggerFactory.getLogger(AsyncNettyHttpServer.class);
     @Autowired
@@ -73,7 +73,7 @@ public class AsyncNettyHttpServer {
     // 唯一标识符的AttributeKey
     private static final AttributeKey<String> REQUEST_ID_KEY = AttributeKey.valueOf("requestId");
     // 滑动窗口限流(全局限流体系)
-    private final SlidingWindowCounter counter = new SlidingWindowCounter(60, 600);
+    private final SlidingWindowCounter counter = new SlidingWindowCounter(60, 6000);
     // 服务令牌桶相关(服务限流体系)
     private final ConcurrentHashMap<InetSocketAddress, TokenBucket> serviceBucketMap = new ConcurrentHashMap<>();
     // 用户令牌桶相关(用户限流体系)

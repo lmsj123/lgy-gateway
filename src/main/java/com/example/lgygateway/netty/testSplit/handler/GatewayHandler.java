@@ -5,6 +5,7 @@ import com.example.lgygateway.circuitBreaker.CircuitBreaker;
 import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.netty.testSplit.manager.ChannelPoolManager;
 import com.example.lgygateway.netty.testSplit.manager.CircuitBreakerManager;
+import com.example.lgygateway.netty.testSplit.manager.LimitManager;
 import com.example.lgygateway.netty.testSplit.manager.RequestContextMapManager;
 import com.example.lgygateway.netty.testSplit.model.RequestContext;
 import com.example.lgygateway.route.RouteTableByTrie;
@@ -48,10 +49,11 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
     private LimitManager limitManager;
     @Autowired
     private RequestContextMapManager requestContextMapManager;
+    @Autowired
+    private ErrorHandler errorHandler;
     private AttributeKey<String> REQUEST_ID_KEY;
     private ConcurrentHashMap<String, RequestContext> requestContextMap;
     Logger logger = LoggerFactory.getLogger(GatewayHandler.class);
-
     @PostConstruct
     public void init() {
         this.REQUEST_ID_KEY = requestContextMapManager.getRequestIdKey();
@@ -59,7 +61,6 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
     }
     @Autowired
     private ApplicationContext applicationContext;
-
     //SimpleChannelInboundHandler 在 channelRead0 方法执行完毕后会自动调用 ReferenceCountUtil.release(msg)，因此无需手动释放请求对象。
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
@@ -93,17 +94,16 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             logger.info("路由匹配失败 释放相关请求");
             // ReferenceCountUtil.safeRelease(request);
             // [6] 返回404错误
-            sendErrorResponse(ctx, HttpResponseStatus.NOT_FOUND);
+            errorHandler.sendErrorResponse(ctx, HttpResponseStatus.NOT_FOUND);
         }
     }
-
     // 使用了连接池长连接 避免每次都进行tcp连接
     public void forwardRequestWithRetry(ChannelHandlerContext ctx, FullHttpRequest request, int retries) {
         URI uri = null;
         try {
             uri = new URI(request.uri());
         } catch (URISyntaxException e) {
-            sendErrorResponse(ctx, HttpResponseStatus.BAD_REQUEST);
+            errorHandler.sendErrorResponse(ctx, HttpResponseStatus.BAD_REQUEST);
             ReferenceCountUtil.safeRelease(request); // 无论成功或失败，最终释放请求资源
         }
         CircuitBreaker circuitBreaker = circuitBreakerManager.getCircuitBreaker(uri, request, ctx);
@@ -147,7 +147,7 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
                             logger.info("发送请求失败");
                             // 请求失败时记录失败
                             circuitBreaker.recordFailure();
-                            sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+                            errorHandler.sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
                             ReferenceCountUtil.safeRelease(request);//成功发送情况下会自动释放request
                             pool.release(channel); // 确保异常后释放连接
                         }
@@ -158,7 +158,7 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
                     }
                     requestContextMap.remove(requestId);
                     channel.attr(REQUEST_ID_KEY).set(null);
-                    sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+                    errorHandler.sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
                     ReferenceCountUtil.safeRelease(request);
                 }
             } else {
@@ -168,55 +168,6 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             }
         });
     }
-
-    // 发送失败响应给客户端
-    private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status) {
-        // 构建JSON错误信息对象
-        Map<String, Object> errorData = new HashMap<>();
-        errorData.put("code", status.code());
-        errorData.put("message", status.reasonPhrase());
-        errorData.put("timestamp", System.currentTimeMillis());
-        logger.warn("正在发送失败响应");
-        String jsonResponse;
-        try {
-            jsonResponse = JSONUtil.toJsonStr(errorData); // 使用JSON库（如FastJSON/Gson）
-        } catch (Exception e) {
-            jsonResponse = "{\"error\":\"JSON序列化失败\"}";
-            logger.error("JSON序列化异常", e);
-        }
-        String requestId = ctx.channel().attr(REQUEST_ID_KEY).get();
-        // 创建响应对象
-        ByteBuf content = Unpooled.copiedBuffer(jsonResponse, CharsetUtil.UTF_8);
-        FullHttpResponse response = new DefaultFullHttpResponse(
-                HTTP_1_1,
-                status,
-                content  // 空内容，可根据需要填充错误信息
-        );
-
-        // 异步清理请求上下文和Channel属性
-        // 使用 Netty 的 EventLoop 执行清理
-        ctx.channel().eventLoop().execute(() -> {
-            if (requestId != null) {
-                requestContextMap.remove(requestId); // 移除全局缓存
-                ctx.channel().attr(REQUEST_ID_KEY).set(null);// 清理Channel属性
-            }
-        });
-
-        // 设置必要的响应头
-        response.headers()
-                .set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8") // 必须包含charset
-                .set(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes())// 明确内容长度
-                .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);// Keep-Alive复用连接
-
-
-        // 发送响应并关闭连接
-        ctx.writeAndFlush(response).addListener(future -> {
-            if (!future.isSuccess()) {
-                ReferenceCountUtil.safeRelease(content);
-            }
-        });
-    }
-
     // 处理连接获取失败
     private void handleAcquireFailure(ChannelHandlerContext ctx, FullHttpRequest request, int retries, Throwable cause) throws URISyntaxException {
         if (retries > 0) {
@@ -224,7 +175,7 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             if (!isRetriableError(cause)) {
                 logger.info("错误的类型 释放请求连接");
                 ReferenceCountUtil.safeRelease(request);
-                sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+                errorHandler.sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
                 return;
             }
             if (limitManager.limitByGlobalAndUser(ctx, request)) {
@@ -246,16 +197,14 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
         } else {
             logger.info("重试次数为0 发送响应失败请求");
             ReferenceCountUtil.safeRelease(request);
-            sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
+            errorHandler.sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
         }
     }
-
     // 辅助方法：判断是否可重试错误
     private boolean isRetriableError(Throwable cause) {
         return cause instanceof ConnectException ||
                 cause instanceof TimeoutException;
     }
-
     // 辅助方法：计算退避时间
     private int calculateBackoffDelay(int retries) {
         int base = 1000; // 1秒基数

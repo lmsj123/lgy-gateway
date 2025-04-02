@@ -2,7 +2,9 @@ package com.example.lgygateway.netty;
 
 import cn.hutool.json.JSONUtil;
 import com.example.lgygateway.circuitBreaker.CircuitBreaker;
+import com.example.lgygateway.config.ChannelPoolConfig;
 import com.example.lgygateway.config.CircuitBreakerConfig;
+import com.example.lgygateway.config.LimitConfig;
 import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.limit.SlidingWindowCounter;
 import com.example.lgygateway.limit.TokenBucket;
@@ -52,7 +54,7 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 //     2)后续可以添加熔断机制，快速失败（已完成）
 //     3)后续将相关配置优化为可动态调整
 //     4)后续优化成可以适配https等
-@Component("test")
+@Component
 public class AsyncNettyHttpServer {
     private static final Logger logger = LoggerFactory.getLogger(AsyncNettyHttpServer.class);
     @Autowired
@@ -61,19 +63,21 @@ public class AsyncNettyHttpServer {
     private CircuitBreakerConfig circuitBreakerConfig;
     @Autowired
     private RouteTableByTrie routeTable; // 动态路由表
+    @Autowired
+    private ChannelPoolConfig channelPoolConfig;
+    @Autowired
+    private LimitConfig limitConfig;
     // 定义全局的请求上下文缓存（线程安全）
     private static final ConcurrentHashMap<String, RequestContext> requestContextMap = new ConcurrentHashMap<>();
     // 初始化连接池
     private final ChannelPoolMap<InetSocketAddress, FixedChannelPool> poolMap;
-    private static final int MAX_CONNECTIONS = 50;      // 每个后端地址最大连接数
-    private static final int ACQUIRE_TIMEOUT_MS = 5000; // 获取连接超时时间
     // 客户端连接池，复用长连接与线程资源，避免每次转发都新建连接。
     private final Bootstrap clientBootstrap; // 客户端连接池启动器
     private final NioEventLoopGroup clientGroup; // 客户端io线程组 io多路复用
     // 唯一标识符的AttributeKey
     private static final AttributeKey<String> REQUEST_ID_KEY = AttributeKey.valueOf("requestId");
     // 滑动窗口限流(全局限流体系)
-    private final SlidingWindowCounter counter = new SlidingWindowCounter(60, 6000);
+    private SlidingWindowCounter counter;
     // 服务令牌桶相关(服务限流体系)
     private final ConcurrentHashMap<InetSocketAddress, TokenBucket> serviceBucketMap = new ConcurrentHashMap<>();
     // 用户令牌桶相关(用户限流体系)
@@ -90,7 +94,7 @@ public class AsyncNettyHttpServer {
             // 初始化Channel的Pipeline（与客户端Bootstrap配置一致）
             ch.pipeline()
                     .addLast(new HttpClientCodec()) // 客户端应使用HttpClientCodec
-                    .addLast(new HttpObjectAggregator(65536))
+                    .addLast(new HttpObjectAggregator(10 * 1024 * 1024))
                     .addLast(new BackendHandler());
         }
     }
@@ -132,14 +136,14 @@ public class AsyncNettyHttpServer {
                         new CustomChannelPoolHandler(),
                         ChannelHealthChecker.ACTIVE, //使用默认健康检查
                         FixedChannelPool.AcquireTimeoutAction.FAIL,//获取超时后抛出异常
-                        5000,
-                        MAX_CONNECTIONS,
-                        ACQUIRE_TIMEOUT_MS
+                        channelPoolConfig.getAcquireTimeoutMillis(),
+                        channelPoolConfig.getMaxConnections(),
+                        channelPoolConfig.getMaxPendingRequests()
                 );
                 logger.info("正在预热连接");
                 // 异步预热10%连接
                 new Thread(() -> {
-                    int warmupConnections = (int) (MAX_CONNECTIONS * 0.1);
+                    int warmupConnections = (int) (channelPoolConfig.getMaxConnections() * 0.1);
                     for (int i = 0; i < warmupConnections; i++) {
                         pool.acquire().addListener(future -> {
                             if (future.isSuccess()) {
@@ -197,7 +201,7 @@ public class AsyncNettyHttpServer {
                                 // 1. 编解码器
                                 .addLast(new HttpClientCodec())
                                 // 2. 聚合器
-                                .addLast(new HttpObjectAggregator(65536))
+                                .addLast(new HttpObjectAggregator(10 * 1024 * 1024))
                                 // 3. 超时控制（应在业务处理器前）
                                 .addLast(new ReadTimeoutHandler(30, TimeUnit.SECONDS)) // 读超时
                                 .addLast(new WriteTimeoutHandler(30, TimeUnit.SECONDS)) // 新增写超时
@@ -211,59 +215,74 @@ public class AsyncNettyHttpServer {
     private final EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(Runtime.getRuntime().availableProcessors() * 2);
 
     @PostConstruct
-    public void start() throws InterruptedException {
-        // 1. 线程组初始化
-        // 默认NioEventLoopGroup线程数=CPU核心数×2，在32核服务器上产生64线程，可能导致上下文切换开销
-        EventLoopGroup bossGroup = new NioEventLoopGroup(2);// 主线程组（处理TCP连接请求）
-        EventLoopGroup workerGroup = new NioEventLoopGroup(16);// 工作线程组（处理IO读写）
-        // 2. 服务端引导类配置
-        ServerBootstrap b = new ServerBootstrap();
-        b.group(bossGroup, workerGroup)
-                // 3. 通道类型选择
-                .channel(NioServerSocketChannel.class) // 使用NIO模型（对比：OioServerSocketChannel为阻塞式）
-                // 4. 管道处理器链配置
-                .childHandler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) {
-                        logger.info("正在初始化GatewayHandler（请求阶段）");
-                        ch.pipeline()
-                                // 4.1 HTTP协议编解码器（必须第一顺位）
-                                .addLast(new HttpServerCodec()) // 组合HttpRequestDecoder+HttpResponseEncoder
-                                // 4.2 请求聚合器
-                                .addLast(new HttpObjectAggregator(10 * 1024 * 1024)) // 10MB
-                                .addLast(new ChannelInboundHandlerAdapter() {
-                                    // 请求内容太大了
-                                    @Override
-                                    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-                                        if (cause instanceof TooLongFrameException) {
-                                            sendErrorResponse(ctx, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE);
-                                        }
-                                    }
-                                })
-                                // 4.3 业务处理器（绑定独立线程池）
-                                .addLast(businessGroup, new GatewayHandler()); // 避免阻塞IO线程
+    public void start() {
+        counter = new SlidingWindowCounter(limitConfig.getWindowSizeSec(), limitConfig.getSliceCount());
+        // 如果不开启一个新线程 阻塞主️线程
+        /*
+            这会延迟 Spring 容器的完整初始化，导致：
+            其他 Bean 的初始化被阻塞
+            Actuator 端点无法及时就绪
+            健康检查状态延迟更新
+            条件评估报告出现未完成初始化的提示
+         */
+        CompletableFuture.runAsync(() -> {
+            try {
+                // 1. 线程组初始化
+                // 默认NioEventLoopGroup线程数=CPU核心数×2，在32核服务器上产生64线程，可能导致上下文切换开销
+                EventLoopGroup bossGroup = new NioEventLoopGroup(2);// 主线程组（处理TCP连接请求）
+                EventLoopGroup workerGroup = new NioEventLoopGroup(16);// 工作线程组（处理IO读写）
+                // 2. 服务端引导类配置
+                ServerBootstrap b = new ServerBootstrap();
+                b.group(bossGroup, workerGroup)
+                        // 3. 通道类型选择
+                        .channel(NioServerSocketChannel.class) // 使用NIO模型（对比：OioServerSocketChannel为阻塞式）
+                        // 4. 管道处理器链配置
+                        .childHandler(new ChannelInitializer<SocketChannel>() {
+                            @Override
+                            protected void initChannel(SocketChannel ch) {
+                                logger.info("正在初始化GatewayHandler（请求阶段）");
+                                ch.pipeline()
+                                        // 4.1 HTTP协议编解码器（必须第一顺位）
+                                        .addLast(new HttpServerCodec()) // 组合HttpRequestDecoder+HttpResponseEncoder
+                                        // 4.2 请求聚合器
+                                        .addLast(new HttpObjectAggregator(10 * 1024 * 1024)) // 10MB
+                                        .addLast(new ChannelInboundHandlerAdapter() {
+                                            // 请求内容太大了
+                                            @Override
+                                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                                                if (cause instanceof TooLongFrameException) {
+                                                    sendErrorResponse(ctx, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE);
+                                                }
+                                            }
+                                        })
+                                        // 4.3 业务处理器（绑定独立线程池）
+                                        .addLast(businessGroup, new GatewayHandler()); // 避免阻塞IO线程
+                            }
+                        })
+                        // 5. TCP参数配置
+                        .option(ChannelOption.SO_BACKLOG, 1024) // 根据预估并发量调整 等待连接队列大小
+                        .childOption(ChannelOption.SO_KEEPALIVE, true) // 启用TCP Keep-Alive探活
+                        .childOption(ChannelOption.AUTO_READ, true); // 自动触发Channel读事件
+                // 6. 端口绑定与启动
+                logger.info("netty绑定端口为{}", nettyConfig.getPort());
+                ChannelFuture f = b.bind(nettyConfig.getPort()).sync(); // 同步阻塞直至端口绑定成功
+                f.addListener(future -> {
+                    if (!future.isSuccess()) {
+                        logger.error("端口绑定失败", future.cause());
                     }
-                })
-                // 5. TCP参数配置
-                .option(ChannelOption.SO_BACKLOG, 1024) // 根据预估并发量调整 等待连接队列大小
-                .childOption(ChannelOption.SO_KEEPALIVE, true) // 启用TCP Keep-Alive探活
-                .childOption(ChannelOption.AUTO_READ, true); // 自动触发Channel读事件
-        // 6. 端口绑定与启动
-        logger.info("netty绑定端口为{}", nettyConfig.getPort());
-        ChannelFuture f = b.bind(nettyConfig.getPort()).sync(); // 同步阻塞直至端口绑定成功
-        f.addListener(future -> {
-            if (!future.isSuccess()) {
-                logger.error("端口绑定失败", future.cause());
+                });
+                // 添加优雅关机逻辑
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    bossGroup.shutdownGracefully();
+                    workerGroup.shutdownGracefully();
+                }));
+                // 7. 阻塞直至服务端关闭
+                //这行代码通过阻塞当前线程，防止 Netty 服务在启动后立即退出，确保服务端持续监听端口并处理请求。
+                f.channel().closeFuture().sync(); // 阻塞主线程（需结合优雅关机逻辑）
+            } catch (Exception e) {
+                e.fillInStackTrace();
             }
         });
-        // 添加优雅关机逻辑
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            bossGroup.shutdownGracefully();
-            workerGroup.shutdownGracefully();
-        }));
-        // 7. 阻塞直至服务端关闭
-        f.channel().closeFuture().sync(); // 阻塞主线程（需结合优雅关机逻辑）
-
     }
 
     // 发送端
@@ -331,7 +350,7 @@ public class AsyncNettyHttpServer {
             sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
             return;
         }
-        TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
+        TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(limitConfig.getServiceMaxBurst(), limitConfig.getServiceTokenRefillRate()));
         if (!tokenBucket.tryAcquire(1)) {
             logger.info("该 {}:{} 服务实例被限流 释放相关请求", uri.getHost(), uri.getPort());
             ReferenceCountUtil.safeRelease(request);
@@ -361,6 +380,7 @@ public class AsyncNettyHttpServer {
                     //绑定元数据到channel
                     channel.attr(REQUEST_ID_KEY).set(requestId);
                     //发送请求
+                    //writeAndFlush(request)发送成功时会自动回收request
                     channel.writeAndFlush(request).addListener((ChannelFuture writeFuture) -> {
                         if (writeFuture.isSuccess()) {
                             logger.info("成功发送请求");
@@ -410,7 +430,7 @@ public class AsyncNettyHttpServer {
             }
             URI uri = new URI(request.uri());
             InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
-            TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
+            TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(limitConfig.getServiceMaxBurst(), limitConfig.getServiceTokenRefillRate()));
             if (!tokenBucket.tryAcquire(1)) {
                 logger.info("该 {}:{} 服务实例被限流 释放请求连接", uri.getHost(), uri.getPort());
                 ReferenceCountUtil.safeRelease(request);
@@ -449,7 +469,7 @@ public class AsyncNettyHttpServer {
             }
             URI uri = new URI(request.uri());
             InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
-            TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(nettyConfig.getServiceMaxBurst(), nettyConfig.getServiceTokenRefillRate()));
+            TokenBucket tokenBucket = serviceBucketMap.computeIfAbsent(inetSocketAddress, k -> new TokenBucket(limitConfig.getServiceMaxBurst(), limitConfig.getServiceTokenRefillRate()));
             if (!tokenBucket.tryAcquire(1)) {
                 logger.info("该 {}:{} 服务实例被限流 释放副本请求", uri.getHost(), uri.getPort());
                 sendErrorResponse(ctx, TOO_MANY_REQUESTS);
@@ -472,21 +492,21 @@ public class AsyncNettyHttpServer {
 
     // 全局限流和用户级限流的校验
     private boolean limit(ChannelHandlerContext ctx, FullHttpRequest request) {
-        if (!counter.allowRequest(nettyConfig.getMaxQps())) {
+        if (!counter.allowRequest(limitConfig.getMaxQps())) {
             logger.info("全局限流体系（滑动窗口）提示请求被限流");
             sendErrorResponse(ctx, TOO_MANY_REQUESTS);
             return true;
         }
         String userId = extractUserId(request);
         if (userId.isEmpty()) {
-            TokenBucket userTokenBucket = userBucketMap.computeIfAbsent(userId, k -> new TokenBucket(nettyConfig.getUserMaxBurst(), nettyConfig.getUserTokenRefillRate()));
+            TokenBucket userTokenBucket = userBucketMap.computeIfAbsent(userId, k -> new TokenBucket(limitConfig.getUserMaxBurst(), limitConfig.getUserTokenRefillRate()));
             if (!userTokenBucket.tryAcquire(1)) {
                 logger.info("该用户{}被限流", userId);
                 sendErrorResponse(ctx, TOO_MANY_REQUESTS);
                 return true;
             }
         } else {
-            TokenBucket noUserTokenBucket = noUserBucketMap.computeIfAbsent("noUser", k -> new TokenBucket(nettyConfig.getNoUserMaxBurst(), nettyConfig.getNoUserTokenRefillRate()));
+            TokenBucket noUserTokenBucket = noUserBucketMap.computeIfAbsent("noUser", k -> new TokenBucket(limitConfig.getNoUserMaxBurst(), limitConfig.getNoUserTokenRefillRate()));
             if (!noUserTokenBucket.tryAcquire(1)) {
                 logger.info("该游客被限流");
                 sendErrorResponse(ctx, TOO_MANY_REQUESTS);
@@ -512,7 +532,7 @@ public class AsyncNettyHttpServer {
                 try {
                     circuitBreakerRecordMes(context, backendResponse);
                     // 判断是否符合重试条件
-                    if (shouldRetry(backendResponse, context.getOriginalRequest())) {
+                    if (shouldRetry(backendResponse, context.originalRequest)) {
                         logger.info("响应符合重试条件 正在尝试重试");
                         handleRetry(context.getFrontendCtx(), context.originalRequest, context.remainingRetries);
                     } else {
@@ -626,7 +646,9 @@ public class AsyncNettyHttpServer {
         // 发送响应并关闭连接
         ctx.writeAndFlush(response).addListener(future -> {
             if (!future.isSuccess()) {
-                ReferenceCountUtil.safeRelease(content);
+                if (content.refCnt() > 0) {
+                    ReferenceCountUtil.safeRelease(content);
+                }
             }
         });
     }

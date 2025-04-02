@@ -25,15 +25,30 @@ circuit-breaker:
   halfOpenSuccessThreshold: 3
   counterResetThreshold: 1000
 
+#配置channel pool连接池参数
+pool:
+  acquire-timeout-millis: 5000 # 获取连接的超时时间
+  max-connections: 5000 # 连接池中允许的最大连接数
+  max-pending-requests: 1000 # 最大获取连接的请求数 超过了这个数量的额外请求将被拒绝或抛出异常
 
 #配置netty所监听的端口
 netty:
-  port: 10001
-  times: 3
-  maxQps: 1000 # 全局最大QPS
-  serviceTokenRefillRate: 200 # 服务令牌桶每秒填充速率
-  serviceMaxBurst: 500 # 服务令牌桶容量
-  userTokenRefillRate: 200
-  userMaxBurst: 500
-  noUserTokenRefillRate: 200
-  noUserMaxBurst: 500
+  port: 10001 # netty监听的端口号
+  times: 3 # 转发请求时的重试次数
+
+logging:
+  level:
+    org:
+      springframework:
+        boot:
+          autoconfigure: error
+limit:
+  maxQps: 10000 # 滑动窗口接受请求的最大qps
+  no-user-max-burst: 50000 # 游客令牌桶容量
+  no-user-token-refill-rate: 200 # 游客令牌桶每秒填充速率
+  user-max-burst: 50000 # 用户令牌桶容量
+  user-token-refill-rate: 200 # 用户令牌桶每秒填充速率
+  service-max-burst: 50000 # 服务令牌桶容量
+  service-token-refill-rate: 200 # 服务令牌桶每秒填充速率
+  window-size-sec: 60 # 窗口总时长（秒）
+  slice-count: 60000 # 窗口分片数量

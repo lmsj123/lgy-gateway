@@ -2,6 +2,7 @@ package com.example.lgygateway.netty.testSplit.manager;
 
 import com.example.lgygateway.netty.testSplit.model.RequestContext;
 import io.netty.util.AttributeKey;
+import jakarta.annotation.PostConstruct;
 import lombok.Getter;
 import org.springframework.stereotype.Component;
 
@@ -21,6 +22,10 @@ public class RequestContextMapManager {
 
     public AttributeKey<String> getRequestIdKey() {
         return REQUEST_ID_KEY;
+    }
+    @PostConstruct
+    public void init(){
+        deleteOutTime();
     }
     //定时任务删除缓存
     private void deleteOutTime() {

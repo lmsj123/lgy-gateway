@@ -27,7 +27,6 @@ public class ChannelPoolManager {
     private ChannelPoolMap<InetSocketAddress, FixedChannelPool> poolMap;
     private static final int MAX_CONNECTIONS = 50;      // 每个后端地址最大连接数
     private static final int ACQUIRE_TIMEOUT_MS = 5000; // 获取连接超时时间
-
     @PostConstruct
     public void init() {
         this.poolMap = new AbstractChannelPoolMap<>() {
@@ -64,8 +63,6 @@ public class ChannelPoolManager {
             }
         };
     }
-
-
     // 自定义ChannelPoolHandler
     class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
         @Override

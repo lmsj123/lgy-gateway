@@ -1,18 +1,16 @@
 package com.example.lgygateway.netty.testSplit.handler;
 
-import cn.hutool.json.JSONUtil;
 import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.netty.testSplit.manager.ChannelPoolManager;
 import com.example.lgygateway.netty.testSplit.manager.CircuitBreakerManager;
+import com.example.lgygateway.netty.testSplit.manager.LimitManager;
 import com.example.lgygateway.netty.testSplit.manager.RequestContextMapManager;
 import com.example.lgygateway.netty.testSplit.model.RequestContext;
-import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.channel.pool.*;
 import io.netty.handler.codec.http.*;
 import io.netty.util.AttributeKey;
-import io.netty.util.CharsetUtil;
 import io.netty.util.ReferenceCountUtil;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -21,13 +19,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
-
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.*;
 import java.util.concurrent.*;
-
 import static io.netty.handler.codec.http.HttpResponseStatus.BAD_GATEWAY;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
@@ -36,16 +31,16 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 @Scope("prototype")
 public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse> {
     @Autowired
+    private ErrorHandler errorHandler;
+    @Autowired
     private CircuitBreakerManager circuitBreakerManager;
     @Autowired
     private NettyConfig nettyConfig;
     @Autowired
     private GatewayHandler gatewayHandler;
-
     Logger logger = LoggerFactory.getLogger(BackendHandler.class);
     @Autowired
     private RequestContextMapManager requestContextMapManager;
-    // 添加构造函数接收依赖
     @Autowired
     private LimitManager limitManager;
     private AttributeKey<String> REQUEST_ID_KEY;
@@ -107,7 +102,7 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
             // 创建请求副本并增加引用计数
             FullHttpRequest copiedRequest = copyAndRetainRequest(request);
             if (copiedRequest == null) {
-                sendErrorResponse(ctx, BAD_GATEWAY);
+                errorHandler.sendErrorResponse(ctx, BAD_GATEWAY);
                 return;
             }
             if (limitManager.limitByGlobalAndUser(ctx, copiedRequest)) {
@@ -128,7 +123,7 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
 
         } else {
             logger.info("重试次数耗尽 发送失败响应");
-            sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
+            errorHandler.sendErrorResponse(ctx, HttpResponseStatus.BAD_GATEWAY);
         }
     }
 
@@ -173,53 +168,6 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
             }
         });
         logger.info("正在返回响应");
-    }
-    // 发送失败响应给客户端
-    private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status) {
-        // 构建JSON错误信息对象
-        Map<String, Object> errorData = new HashMap<>();
-        errorData.put("code", status.code());
-        errorData.put("message", status.reasonPhrase());
-        errorData.put("timestamp", System.currentTimeMillis());
-        logger.warn("正在发送失败响应");
-        String jsonResponse;
-        try {
-            jsonResponse = JSONUtil.toJsonStr(errorData); // 使用JSON库（如FastJSON/Gson）
-        } catch (Exception e) {
-            jsonResponse = "{\"error\":\"JSON序列化失败\"}";
-            logger.error("JSON序列化异常", e);
-        }
-        String requestId = ctx.channel().attr(REQUEST_ID_KEY).get();
-        // 创建响应对象
-        ByteBuf content = Unpooled.copiedBuffer(jsonResponse, CharsetUtil.UTF_8);
-        FullHttpResponse response = new DefaultFullHttpResponse(
-                HTTP_1_1,
-                status,
-                content  // 空内容，可根据需要填充错误信息
-        );
-
-        // 异步清理请求上下文和Channel属性
-        // 使用 Netty 的 EventLoop 执行清理
-        ctx.channel().eventLoop().execute(() -> {
-            if (requestId != null) {
-                requestContextMap.remove(requestId); // 移除全局缓存
-                ctx.channel().attr(REQUEST_ID_KEY).set(null);// 清理Channel属性
-            }
-        });
-
-        // 设置必要的响应头
-        response.headers()
-                .set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8") // 必须包含charset
-                .set(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes())// 明确内容长度
-                .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);// Keep-Alive复用连接
-
-
-        // 发送响应并关闭连接
-        ctx.writeAndFlush(response).addListener(future -> {
-            if (!future.isSuccess()) {
-                ReferenceCountUtil.safeRelease(content);
-            }
-        });
     }
     // 复制请求并保留引用计数
     private FullHttpRequest copyAndRetainRequest(FullHttpRequest original) {

@@ -3,6 +3,7 @@ package com.example.lgygateway.netty.testSplit.manager;
 import cn.hutool.json.JSONUtil;
 import com.example.lgygateway.circuitBreaker.CircuitBreaker;
 import com.example.lgygateway.config.CircuitBreakerConfig;
+import com.example.lgygateway.netty.testSplit.handler.ErrorHandler;
 import com.example.lgygateway.netty.testSplit.model.RequestContext;
 import com.example.lgygateway.utils.Log;
 import io.netty.buffer.ByteBuf;
@@ -31,16 +32,7 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 @Component
 public class CircuitBreakerManager {
     @Autowired
-    private RequestContextMapManager requestContextMapManager;
-    private AttributeKey<String> REQUEST_ID_KEY;
-    private ConcurrentHashMap<String, RequestContext> requestContextMap;
-
-    @PostConstruct
-    public void init() {
-        this.REQUEST_ID_KEY = requestContextMapManager.getRequestIdKey();
-        this.requestContextMap = requestContextMapManager.getRequestContextMap();
-    }
-
+    private ErrorHandler errorHandler;
     Logger logger = LoggerFactory.getLogger(CircuitBreakerManager.class);
     @Autowired
     private CircuitBreakerConfig circuitBreakerConfig;
@@ -82,58 +74,9 @@ public class CircuitBreakerManager {
         if (!circuitBreaker.allowRequest()) {
             logger.info("熔断器发挥降级作用，释放相关请求");
             ReferenceCountUtil.safeRelease(request);
-            sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
+            errorHandler.sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
             return null;
         }
         return circuitBreaker;
     }
-
-    // 发送失败响应给客户端
-    private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status) {
-        // 构建JSON错误信息对象
-        Map<String, Object> errorData = new HashMap<>();
-        errorData.put("code", status.code());
-        errorData.put("message", status.reasonPhrase());
-        errorData.put("timestamp", System.currentTimeMillis());
-        logger.warn("正在发送失败响应");
-        String jsonResponse;
-        try {
-            jsonResponse = JSONUtil.toJsonStr(errorData); // 使用JSON库（如FastJSON/Gson）
-        } catch (Exception e) {
-            jsonResponse = "{\"error\":\"JSON序列化失败\"}";
-            logger.error("JSON序列化异常", e);
-        }
-        String requestId = ctx.channel().attr(REQUEST_ID_KEY).get();
-        // 创建响应对象
-        ByteBuf content = Unpooled.copiedBuffer(jsonResponse, CharsetUtil.UTF_8);
-        FullHttpResponse response = new DefaultFullHttpResponse(
-                HTTP_1_1,
-                status,
-                content  // 空内容，可根据需要填充错误信息
-        );
-
-        // 异步清理请求上下文和Channel属性
-        // 使用 Netty 的 EventLoop 执行清理
-        ctx.channel().eventLoop().execute(() -> {
-            if (requestId != null) {
-                requestContextMap.remove(requestId); // 移除全局缓存
-                ctx.channel().attr(REQUEST_ID_KEY).set(null);// 清理Channel属性
-            }
-        });
-
-        // 设置必要的响应头
-        response.headers()
-                .set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8") // 必须包含charset
-                .set(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes())// 明确内容长度
-                .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);// Keep-Alive复用连接
-
-
-        // 发送响应并关闭连接
-        ctx.writeAndFlush(response).addListener(future -> {
-            if (!future.isSuccess()) {
-                ReferenceCountUtil.safeRelease(content);
-            }
-        });
-    }
-
 }

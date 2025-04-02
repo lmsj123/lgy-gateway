@@ -28,8 +28,8 @@ circuit-breaker:
 #配置channel pool连接池参数
 pool:
   acquire-timeout-millis: 5000 # 获取连接的超时时间
-  max-connections: 5000 # 连接池中允许的最大连接数
-  max-pending-requests: 1000 # 最大获取连接的请求数 超过了这个数量的额外请求将被拒绝或抛出异常
+  max-connections: 200 # 连接池中允许的最大连接数
+  max-pending-requests: 400 # 最大获取连接的请求数 超过了这个数量的额外请求将被拒绝或抛出异常
 
 #配置netty所监听的端口
 netty:
@@ -43,12 +43,12 @@ logging:
         boot:
           autoconfigure: error
 limit:
-  maxQps: 10000 # 滑动窗口接受请求的最大qps
-  no-user-max-burst: 50000 # 游客令牌桶容量
-  no-user-token-refill-rate: 200 # 游客令牌桶每秒填充速率
-  user-max-burst: 50000 # 用户令牌桶容量
-  user-token-refill-rate: 200 # 用户令牌桶每秒填充速率
-  service-max-burst: 50000 # 服务令牌桶容量
-  service-token-refill-rate: 200 # 服务令牌桶每秒填充速率
-  window-size-sec: 60 # 窗口总时长（秒）
-  slice-count: 60000 # 窗口分片数量
+  maxQps: 2000 # 滑动窗口接受请求的最大qps
+  no-user-max-burst: 200 # 游客令牌桶容量
+  no-user-token-refill-rate: 50 # 游客令牌桶每秒填充速率
+  user-max-burst: 1000 # 用户令牌桶容量
+  user-token-refill-rate: 1000 # 用户令牌桶每秒填充速率
+  service-max-burst: 1000 # 服务令牌桶容量
+  service-token-refill-rate: 1000 # 服务令牌桶每秒填充速率
+  window-size-sec: 1 # 窗口总时长（秒）
+  slice-count: 20 # 窗口分片数量

@@ -498,7 +498,7 @@ public class AsyncNettyHttpServer {
             return true;
         }
         String userId = extractUserId(request);
-        if (userId.isEmpty()) {
+        if (!userId.isEmpty()) {
             TokenBucket userTokenBucket = userBucketMap.computeIfAbsent(userId, k -> new TokenBucket(limitConfig.getUserMaxBurst(), limitConfig.getUserTokenRefillRate()));
             if (!userTokenBucket.tryAcquire(1)) {
                 logger.info("该用户{}被限流", userId);

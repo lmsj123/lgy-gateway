@@ -1,61 +1,51 @@
 package com.example.lgygateway.limit;
 
-import java.util.concurrent.atomic.DoubleAdder;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.StampedLock;
 
 public class TokenBucket {
     private final long capacity;
     private final double refillRatePerMs;
     private final StampedLock lock = new StampedLock();
-    private final DoubleAdder availableTokens;
+    private final AtomicLong tokens;
     private volatile long lastRefillTime;
 
-    public TokenBucket(long capacity, long refillTokensPerSecond) {
+    public TokenBucket(long capacity, long refillPerSecond) {
         this.capacity = capacity;
-        this.refillRatePerMs = refillTokensPerSecond / 1000.0;
-        this.availableTokens = new DoubleAdder();
-        this.availableTokens.add(capacity);
+        this.refillRatePerMs = refillPerSecond / 1000.0;
+        this.tokens = new AtomicLong(capacity);
         this.lastRefillTime = System.currentTimeMillis();
     }
 
-    public boolean tryAcquire(int tokens) {
-        refill();
+    public boolean tryAcquire(int token) {
         long stamp = lock.tryOptimisticRead();
-        double current = availableTokens.sum();
-        if (current < tokens) {
-            return false;
+        long current = tokens.get();
+        if (current < token && tryRefill()) {
+            current = tokens.get();
         }
         if (!lock.validate(stamp)) {
             stamp = lock.readLock();
-            try {
-                current = availableTokens.sum();
-            } finally {
-                lock.unlockRead(stamp);
-            }
+            try { current = tokens.get(); }
+            finally { lock.unlockRead(stamp); }
         }
-        if (current >= tokens) {
-            availableTokens.add(-tokens);
-            return true;
-        }
-        return false;
+        return tokens.compareAndSet(current, current - token);
     }
 
-    private void refill() {
+    private boolean tryRefill() {
         long now = System.currentTimeMillis();
         long lastTime = lastRefillTime;
-        long timeDelta = now - lastTime;
-        if (timeDelta <= 0) return;
+        if (now <= lastTime) return false;
 
+        long timeDelta = now - lastTime;
         double newTokens = timeDelta * refillRatePerMs;
+        if (newTokens < 1) return false;
+
         long stamp = lock.writeLock();
         try {
-            double current = availableTokens.sum() + newTokens;
-            double actualNew = Math.min(capacity, current);
-            availableTokens.reset();
-            availableTokens.add(actualNew);
+            long actual = Math.min(capacity, tokens.get() + (long)newTokens);
+            tokens.set(actual);
             lastRefillTime = now;
-        } finally {
-            lock.unlockWrite(stamp);
-        }
+            return true;
+        } finally { lock.unlockWrite(stamp); }
     }
 }

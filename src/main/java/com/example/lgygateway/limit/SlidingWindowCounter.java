@@ -1,9 +1,10 @@
 package com.example.lgygateway.limit;
 
+import java.util.Arrays;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -16,7 +17,7 @@ public class SlidingWindowCounter {
 
     // 时间槽数据结构
     private static class Slice {
-        AtomicLong counter = new AtomicLong(0); // 当前分片的计数器
+        LongAdder counter = new LongAdder(); // 当前分片的计数器
         long timestamp;                         // 分片的起始时间戳
 
         Slice(long timestamp) {
@@ -31,10 +32,8 @@ public class SlidingWindowCounter {
 
     // 总请求数缓存（后台线程更新）
     private volatile long totalRequests = 0;
-
-    // 锁用于保护分片重置操作
-    private final Lock sliceResetLock = new ReentrantLock();
-
+    // 改用分段锁（按分片索引取锁）
+    private Lock[] segmentLocks;
     // 后台线程池
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
 
@@ -51,27 +50,29 @@ public class SlidingWindowCounter {
         }
         this.currentIndex = sliceCount - 1;
         this.windowStartTime = now - windowSizeSec * 1000L;
-
+        segmentLocks = new Lock[sliceCount];
+        Arrays.fill(segmentLocks, new ReentrantLock());
         // 启动后台任务
         startSliceRotator();
-        startTotalUpdater();
     }
 
     // ----------------- 核心方法 -----------------
 
     public boolean allowRequest(long maxRequests) {
         // 1. 快速检查缓存的总请求数
-        if (totalRequests >= maxRequests) {
+        long realTimeTotal = calculateRealTimeTotal();
+        if (realTimeTotal >= maxRequests) {
             return false;
         }
 
         // 2. 原子递增当前分片计数器
         Slice currentSlice = getCurrentSlice();
-        long newCount = currentSlice.counter.incrementAndGet();
+        currentSlice.counter.increment();
+        long newCount = currentSlice.counter.longValue();
 
         // 3. 二次检查（防止在两次更新间隙超限）
         if (totalRequests + newCount > maxRequests) {
-            currentSlice.counter.decrementAndGet();
+            currentSlice.counter.decrement();
             return false;
         }
         return true;
@@ -91,12 +92,15 @@ public class SlidingWindowCounter {
     }
 
     private Slice rotateSlices(long now) {
-        sliceResetLock.lock();
+        int lockIndex = currentIndex % 16;
+        segmentLocks[lockIndex].lock();
         try {
             // 双重检查锁模式
             int index = currentIndex;
-            if (now - slices[index].timestamp < sliceIntervalMs) {
-                return slices[index];
+            if (now < slices[currentIndex].timestamp) {
+                // 处理时钟回拨
+                windowStartTime = now - windowSizeSec * 1000L;
+                return slices[currentIndex];
             }
 
             // 计算需要前进的分片数
@@ -106,7 +110,7 @@ public class SlidingWindowCounter {
             // 重置过期分片
             for (int i = 1; i <= steps; i++) {
                 int newIndex = (index + i) % sliceCount;
-                slices[newIndex].counter.set(0);
+                slices[newIndex].counter.reset();
                 slices[newIndex].timestamp = now + i * sliceIntervalMs;
             }
 
@@ -115,7 +119,7 @@ public class SlidingWindowCounter {
             windowStartTime = now - windowSizeSec * 1000L;
             return slices[currentIndex];
         } finally {
-            sliceResetLock.unlock();
+            segmentLocks[lockIndex].unlock();
         }
     }
 
@@ -124,24 +128,21 @@ public class SlidingWindowCounter {
         scheduler.scheduleAtFixedRate(() -> rotateSlices(System.currentTimeMillis()), sliceIntervalMs, sliceIntervalMs, TimeUnit.MILLISECONDS);
     }
 
-    // 后台任务2: 定期更新总请求数缓存
-    private void startTotalUpdater() {
-        scheduler.scheduleAtFixedRate(() -> {
-            long sum = 0;
-            long now = System.currentTimeMillis();
-
-            for (Slice slice : slices) {
-                if (slice.timestamp >= windowStartTime) {
-                    sum += slice.counter.get();
-                }
-            }
-            totalRequests = sum;
-        }, 100, 100, TimeUnit.MILLISECONDS); // 每100ms更新一次
-    }
 
     // ----------------- 资源清理 -----------------
     public void shutdown() {
         scheduler.shutdown();
     }
 
+    // 实时计算总数（惰性更新）
+    private long calculateRealTimeTotal() {
+        long sum = 0;
+        long windowStart = System.currentTimeMillis() - windowSizeSec * 1000L;
+        for (Slice slice : slices) {
+            if (slice.timestamp >= windowStart) {
+                sum += slice.counter.longValue();
+            }
+        }
+        return sum;
+    }
 }

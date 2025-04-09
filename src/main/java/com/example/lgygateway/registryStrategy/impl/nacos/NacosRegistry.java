@@ -463,4 +463,16 @@ public class NacosRegistry implements Registry, DisposableBean {
             }
         }
     }
+
+    // 清空缓存（手动触发）
+    public static void clearCache() {
+        if (loadCacheRef != null) {
+            loadCacheRef.clear();  // 清空软引用
+            loadCacheRef = null;   // 可选：彻底释放
+        }
+        if (filterCacheRef != null) {
+            filterCacheRef.clear();
+            filterCacheRef = null;
+        }
+    }
 }

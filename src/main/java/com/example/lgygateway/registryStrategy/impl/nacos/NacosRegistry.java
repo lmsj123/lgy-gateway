@@ -376,12 +376,18 @@ public class NacosRegistry implements Registry, DisposableBean {
                 List<Instance> newInstances = namingService.selectInstances(serviceName, true);
                 // 分离灰度实例和正式实例
                 List<Instance> normalInstances = newInstances.stream()
-                        .filter(inst -> !"gray".equals(inst.getMetadata().get("version")))
-                        .toList();
+                        .filter(inst -> {
+                            Map<String, String> metadata = inst.getMetadata();
+                            return metadata == null || !"gray".equals(metadata.get("version"));
+                        })
+                        .collect(Collectors.toList());
 
                 List<Instance> grayInstances = newInstances.stream()
-                        .filter(inst -> "gray".equals(inst.getMetadata().get("version")))
-                        .toList();
+                        .filter(inst -> {
+                            Map<String, String> metadata = inst.getMetadata();
+                            return metadata != null && "gray".equals(metadata.get("version"));
+                        })
+                        .collect(Collectors.toList());
 
                 Log.logger.info("更新新服务的路由");
                 // 遍历所有关联路径进行更新

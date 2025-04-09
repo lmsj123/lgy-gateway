@@ -1,6 +1,7 @@
 package com.example.lgygateway.circuitBreaker;
 
-import com.example.lgygateway.config.CircuitBreakerConfig;
+import com.example.lgygateway.config.GrayCircuitBreakerConfig;
+import com.example.lgygateway.config.NormalCircuitBreakerConfig;
 import lombok.Data;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -17,10 +18,18 @@ public class CircuitBreaker {
             new AtomicStampedReference<>(State.CLOSED, 0);
     private final CircuitBreakerStats stats = new CircuitBreakerStats();
     private final AtomicInteger halfOpenPermits = new AtomicInteger(0);
-    private final CircuitBreakerConfig config;
+    private NormalCircuitBreakerConfig config = new NormalCircuitBreakerConfig();
 
-    public CircuitBreaker(CircuitBreakerConfig config) {
+    public CircuitBreaker(NormalCircuitBreakerConfig config) {
         this.config = config;
+    }
+    public CircuitBreaker(GrayCircuitBreakerConfig config) {
+        this.config.setHalfOpenPermits(config.getHalfOpenPermits());
+        this.config.setFailureThreshold(config.getFailureThreshold());
+        this.config.setOpenTimeoutMs(config.getOpenTimeoutMs());
+        this.config.setCounterResetThreshold(config.getCounterResetThreshold());
+        this.config.setMinRequestThreshold(config.getMinRequestThreshold());
+        this.config.setHalfOpenSuccessThreshold(config.getHalfOpenSuccessThreshold());
     }
     /**
      * 判断是否允许请求通过

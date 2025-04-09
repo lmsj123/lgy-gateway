@@ -6,10 +6,10 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 
 @Configuration
-@ConfigurationProperties(prefix = "circuit-breaker")
+@ConfigurationProperties(prefix = "gray-circuit-breaker")
 @Data
 @Lazy
-public class CircuitBreakerConfig {
+public class GrayCircuitBreakerConfig {
     private int failureThreshold;      // 失败率阈值（百分比）
     private int minRequestThreshold;   // 最小请求数（低于此值不触发熔断）
     private long openTimeoutMs;      // 熔断持续时间

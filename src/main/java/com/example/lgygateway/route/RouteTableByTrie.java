@@ -43,8 +43,9 @@ public class RouteTableByTrie {
                 //根据定义的负载均衡策略选择一个服务作为转发ip
                 RouteValue routeValue = routeValues.get(path);
                 List<Instance> targetInstances = new ArrayList<>();
+                boolean isGray = false;
                 if (routeValue.getGrayStrategy() != null) {
-                    boolean isGray = checkGrayMatch(request, routeValue.getGrayStrategy());
+                    isGray = checkGrayMatch(request, routeValue.getGrayStrategy());
                     String pathSuffix = isGray ? "-gray" : "-normal";
                     targetInstances = routeRules.get(path + pathSuffix);
                     if(isGray){
@@ -58,7 +59,7 @@ public class RouteTableByTrie {
                 //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
                 String targetUrl = buildTargetUrl(url, path, selectedInstance);
                 Log.logger.info("转发路径为 {}", targetUrl);
-                return createProxyRequest(request, targetUrl);
+                return createProxyRequest(request, targetUrl,isGray);
             }
         }
         return null;
@@ -121,7 +122,7 @@ public class RouteTableByTrie {
     }
 
     // 根据原始请求创建新的HTTP请求对象
-    private FullHttpRequest createProxyRequest(FullHttpRequest original, String targetUrl) throws URISyntaxException {
+    private FullHttpRequest createProxyRequest(FullHttpRequest original, String targetUrl, boolean isGray) throws URISyntaxException {
         URI uri = new URI(targetUrl);
         // 创建新的请求对象
         FullHttpRequest newRequest = new DefaultFullHttpRequest(
@@ -136,6 +137,7 @@ public class RouteTableByTrie {
         newRequest.headers()
                 .set(HttpHeaderNames.HOST, uri.getHost())
                 .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
+        newRequest.headers().set("X-Gray-Hit", isGray ? "true" : "false");
         Log.logger.info("创建新请求完成");
         return newRequest;
     }

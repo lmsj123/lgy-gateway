@@ -2,10 +2,7 @@ package com.example.lgygateway.netty;
 
 import cn.hutool.json.JSONUtil;
 import com.example.lgygateway.circuitBreaker.CircuitBreaker;
-import com.example.lgygateway.config.ChannelPoolConfig;
-import com.example.lgygateway.config.CircuitBreakerConfig;
-import com.example.lgygateway.config.LimitConfig;
-import com.example.lgygateway.config.NettyConfig;
+import com.example.lgygateway.config.*;
 import com.example.lgygateway.limit.SlidingWindowCounter;
 import com.example.lgygateway.limit.TokenBucket;
 import com.example.lgygateway.registryStrategy.Registry;
@@ -60,7 +57,9 @@ public class AsyncNettyHttpServer {
     @Autowired
     private NettyConfig nettyConfig;
     @Autowired
-    private CircuitBreakerConfig circuitBreakerConfig;
+    private NormalCircuitBreakerConfig circuitBreakerConfig;
+    @Autowired
+    private GrayCircuitBreakerConfig grayCircuitBreakerConfig;
     @Autowired
     private RouteTableByTrie routeTable; // 动态路由表
     @Autowired
@@ -85,7 +84,7 @@ public class AsyncNettyHttpServer {
     // 用户令牌桶相关(游客限流体系)
     private final ConcurrentHashMap<String, TokenBucket> noUserBucketMap = new ConcurrentHashMap<>();
     // 熔断器存储
-    private final ConcurrentHashMap<InetSocketAddress, CircuitBreaker> circuitBreakers = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CircuitBreaker> circuitBreakers = new ConcurrentHashMap<>();
 
     // 自定义ChannelPoolHandler
     class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
@@ -112,6 +111,8 @@ public class AsyncNettyHttpServer {
         private boolean keepAlive;
         // 存储过期时间
         private long lastAccessTime;
+        // 是否为灰度发布
+        private boolean isGray;
     }
 
     @Autowired
@@ -334,13 +335,19 @@ public class AsyncNettyHttpServer {
             sendErrorResponse(ctx, HttpResponseStatus.BAD_REQUEST);
             ReferenceCountUtil.safeRelease(request); // 无论成功或失败，最终释放请求资源
         }
+        // 灰度服务和普通服务之间的熔断器应该分离
+        String isGray = request.headers().get("X-Gray-Hit");
+        String circuitBreakerKey = isGray.equals("true") ? uri.getHost() + ":" + uri.getPort() + "-gray" :  uri.getHost() + ":" + uri.getPort() + "-normal";
         InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
         logger.info("正在获取 {}:{} 的熔断器", uri.getHost(), uri.getPort());
         //高并发下多个线程可能同时执行 new CircuitBreaker，导致资源浪费或状态不一致。
         //若 TokenBucket 构造函数无副作用，可以接受短暂重复创建，但需确保 TokenBucket 自身线程安全
         //可考虑优化成双重锁
-        CircuitBreaker circuitBreaker = circuitBreakers.computeIfAbsent(
-                inetSocketAddress,
+        CircuitBreaker circuitBreaker = isGray.equals("true") ? circuitBreakers.computeIfAbsent(
+                circuitBreakerKey,
+                k -> new CircuitBreaker(grayCircuitBreakerConfig)
+        ) : circuitBreakers.computeIfAbsent(
+                circuitBreakerKey,
                 k -> new CircuitBreaker(circuitBreakerConfig)
         );
         // 检查是否允许请求
@@ -362,7 +369,7 @@ public class AsyncNettyHttpServer {
         ctx.channel().attr(REQUEST_ID_KEY).set(requestId); // 绑定到Channel属性（仅存储ID）
 
         // 存储到全局缓存（包含完整上下文）
-        requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request), System.currentTimeMillis()));
+        requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request), System.currentTimeMillis(), isGray.equals("true")));
 
 
         //获取或创建连接池
@@ -537,7 +544,7 @@ public class AsyncNettyHttpServer {
                         handleRetry(context.getFrontendCtx(), context.originalRequest, context.remainingRetries);
                     } else {
                         logger.info("响应成功 准备返回");
-                        forwardResponseToClient(context.getFrontendCtx(), backendResponse, backendCtx);// 正常响应转发
+                        forwardResponseToClient(context, backendResponse, backendCtx);// 正常响应转发
                     }
                 } catch (URISyntaxException e) {
                     throw new RuntimeException(e);
@@ -559,7 +566,7 @@ public class AsyncNettyHttpServer {
                     !request.method().equals(HttpMethod.POST);
         }
 
-        private void forwardResponseToClient(ChannelHandlerContext ctx, FullHttpResponse response, ChannelHandlerContext backendCtx) {
+        private void forwardResponseToClient(RequestContext context, FullHttpResponse response, ChannelHandlerContext backendCtx) {
             FullHttpResponse clientResponse = new DefaultFullHttpResponse(
                     HTTP_1_1,
                     response.status(),
@@ -575,6 +582,10 @@ public class AsyncNettyHttpServer {
                     .set(HttpHeaderNames.ACCESS_CONTROL_MAX_AGE, "3600")
                     .set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8"); // 必须包含charset;
 
+            // BackendHandler 响应处理
+            boolean isGray = context.isGray();
+            ChannelHandlerContext ctx = context.getFrontendCtx();
+            clientResponse.headers().set("X-Gray-Hit", isGray ? "true" : "false");
             // 添加Keep-Alive头 保持长连接
             String requestId = backendCtx.channel().attr(REQUEST_ID_KEY).get();
             HttpUtil.setKeepAlive(clientResponse, requestContextMap.get(requestId).keepAlive);
@@ -676,11 +687,11 @@ public class AsyncNettyHttpServer {
     // 熔断器记录成功与失败的响应
     private void circuitBreakerRecordMes(RequestContext context, FullHttpResponse backendResponse) throws URISyntaxException {
         URI uri = new URI(context.originalRequest.uri());
-        InetSocketAddress inetSocketAddress = new InetSocketAddress(uri.getHost(), uri.getPort());
-        CircuitBreaker circuitBreaker = circuitBreakers.get(inetSocketAddress);
+        String circuitBreakerKey = context.isGray() ? uri.getHost() + ":" + uri.getPort() + "-gray" : uri.getHost() + uri.getPort() + "-normal";
+        CircuitBreaker circuitBreaker = circuitBreakers.get(circuitBreakerKey);
         if (circuitBreaker == null) {
-            circuitBreaker = new CircuitBreaker(circuitBreakerConfig);
-            CircuitBreaker existing = circuitBreakers.putIfAbsent(inetSocketAddress, circuitBreaker);
+            circuitBreaker = context.isGray() ? new CircuitBreaker(grayCircuitBreakerConfig) : new CircuitBreaker(circuitBreakerConfig);
+            CircuitBreaker existing = circuitBreakers.putIfAbsent(circuitBreakerKey, circuitBreaker);
             if (existing != null) {
                 circuitBreaker = existing;
             }

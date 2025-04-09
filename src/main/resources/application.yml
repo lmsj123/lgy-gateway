@@ -16,8 +16,17 @@ zookeeper:
   ip: ""
   port: ""
 
-#配置熔断器的相关属性
-circuit-breaker:
+#配置普通熔断器的相关属性
+normal-circuit-breaker:
+  failureThreshold: 50
+  minRequestThreshold: 20
+  openTimeoutMs: 5000
+  halfOpenPermits: 5
+  halfOpenSuccessThreshold: 3
+  counterResetThreshold: 1000
+
+#配置灰度熔断器的相关属性
+gray-circuit-breaker:
   failureThreshold: 50
   minRequestThreshold: 20
   openTimeoutMs: 5000

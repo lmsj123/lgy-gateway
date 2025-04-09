@@ -22,6 +22,43 @@
 4. 通过配置META-INF.services可以动态指定过滤器和负载均衡策略（SPI机制）
 5. 启动LgyGatewayApplication开启网关路由功能
 6. 后续优化可以从nacos作为配置中心入手 完成动态更新相关数据
+7. 配置文件举例如下： 
+routes:
+   # 系统管理路由
+    - id: 7
+      uri: lb://xxxxService
+      LoadBalancer: RoundRobinLoadBalancer
+      predicates:
+      Path: /xxxx/*
+      Method: ALL  
+      filters:
+        - name: AuthFilter
+        - name: RateLimitFilter
+    - id: 2
+      uri: lb://yyyyService
+      LoadBalancer: RoundRobinLoadBalancer
+      predicates:
+      Path: /yyyy/**
+      Method: ALL  
+      filters:
+        - name: RateLimitFilter
+    - id: 3
+      uri: lb://pythonService
+      LoadBalancer: RoundRobinLoadBalancer
+      predicates:
+      Path: /python/**
+      Method: ALL  
+      filters:
+        - name: AuthFilter
+    - id: 4
+      uri: lb://xxxxService
+      LoadBalancer: RoundRobinLoadBalancer
+      predicates:
+      Path: /xxxx/**
+      Method: ALL  
+      filters:
+        - name: AuthFilter
+        - name: RateLimitFilter
 
 #### 参与贡献
 

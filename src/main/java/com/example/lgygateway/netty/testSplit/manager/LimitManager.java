@@ -1,18 +1,11 @@
 package com.example.lgygateway.netty.testSplit.manager;
 
-import cn.hutool.json.JSONUtil;
 import com.example.lgygateway.config.LimitConfig;
-import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.limit.SlidingWindowCounter;
 import com.example.lgygateway.limit.TokenBucket;
 import com.example.lgygateway.netty.testSplit.handler.ErrorHandler;
-import com.example.lgygateway.netty.testSplit.model.RequestContext;
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.*;
-import io.netty.util.AttributeKey;
-import io.netty.util.CharsetUtil;
 import io.netty.util.ReferenceCountUtil;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -22,12 +15,9 @@ import org.springframework.stereotype.Component;
 
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.netty.handler.codec.http.HttpResponseStatus.TOO_MANY_REQUESTS;
-import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
 @Component
 public class LimitManager {
@@ -42,10 +32,12 @@ public class LimitManager {
     // 服务令牌桶相关(服务限流体系)
     private final ConcurrentHashMap<InetSocketAddress, TokenBucket> serviceBucketMap = new ConcurrentHashMap<>();
     Logger logger = LoggerFactory.getLogger(LimitManager.class);
-    @Autowired
-    private NettyConfig nettyConfig;
     // 滑动窗口限流(全局限流体系)
-    private final SlidingWindowCounter counter = new SlidingWindowCounter(limitConfig.getWindowSizeSec(), limitConfig.getSliceCount());
+    private SlidingWindowCounter counter;
+    @PostConstruct
+    public void init() {
+        counter = new SlidingWindowCounter(limitConfig.getWindowSizeSec(), limitConfig.getSliceCount());
+    }
 
     // 全局限流和用户级限流的校验
     public boolean limitByGlobalAndUser(ChannelHandlerContext ctx, FullHttpRequest request) {

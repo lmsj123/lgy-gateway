@@ -17,4 +17,6 @@ public class RequestContext {
     private boolean keepAlive;
     // 存储过期时间
     public long lastAccessTime;
+    // 判断是否为灰度服务
+    private boolean isGray;
 }

@@ -1,6 +1,5 @@
 package com.example.lgygateway.netty.testSplit.handler;
 
-import cn.hutool.json.JSONUtil;
 import com.example.lgygateway.circuitBreaker.CircuitBreaker;
 import com.example.lgygateway.config.NettyConfig;
 import com.example.lgygateway.netty.testSplit.manager.ChannelPoolManager;
@@ -9,13 +8,10 @@ import com.example.lgygateway.netty.testSplit.manager.LimitManager;
 import com.example.lgygateway.netty.testSplit.manager.RequestContextMapManager;
 import com.example.lgygateway.netty.testSplit.model.RequestContext;
 import com.example.lgygateway.route.RouteTableByTrie;
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.channel.pool.*;
 import io.netty.handler.codec.http.*;
 import io.netty.util.AttributeKey;
-import io.netty.util.CharsetUtil;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import jakarta.annotation.PostConstruct;
@@ -54,13 +50,16 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
     private AttributeKey<String> REQUEST_ID_KEY;
     private ConcurrentHashMap<String, RequestContext> requestContextMap;
     Logger logger = LoggerFactory.getLogger(GatewayHandler.class);
+
     @PostConstruct
     public void init() {
         this.REQUEST_ID_KEY = requestContextMapManager.getRequestIdKey();
         this.requestContextMap = requestContextMapManager.getRequestContextMap();
     }
+
     @Autowired
     private ApplicationContext applicationContext;
+
     //SimpleChannelInboundHandler 在 channelRead0 方法执行完毕后会自动调用 ReferenceCountUtil.release(msg)，因此无需手动释放请求对象。
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
@@ -97,6 +96,7 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             errorHandler.sendErrorResponse(ctx, HttpResponseStatus.NOT_FOUND);
         }
     }
+
     // 使用了连接池长连接 避免每次都进行tcp连接
     public void forwardRequestWithRetry(ChannelHandlerContext ctx, FullHttpRequest request, int retries) {
         URI uri = null;
@@ -106,7 +106,11 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             errorHandler.sendErrorResponse(ctx, HttpResponseStatus.BAD_REQUEST);
             ReferenceCountUtil.safeRelease(request); // 无论成功或失败，最终释放请求资源
         }
-        CircuitBreaker circuitBreaker = circuitBreakerManager.getCircuitBreaker(uri, request, ctx);
+        // 灰度服务和普通服务之间的熔断器应该分离
+        String isGray = request.headers().get("X-Gray-Hit");
+        String circuitBreakerKey = isGray.equals("true") ? uri.getHost() + ":" + uri.getPort() + "-gray" : uri.getHost() + ":" + uri.getPort() + "-normal";
+        logger.info("正在获取 {}:{} 的熔断器", uri.getHost(), uri.getPort());
+        CircuitBreaker circuitBreaker = circuitBreakerManager.getCircuitBreaker(circuitBreakerKey, isGray, request, ctx);
         if (circuitBreaker == null) {
             return;
         }
@@ -117,7 +121,7 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
         ctx.channel().attr(REQUEST_ID_KEY).set(requestId); // 绑定到Channel属性（仅存储ID）
 
         // 存储到全局缓存（包含完整上下文）
-        requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request), System.currentTimeMillis()));
+        requestContextMap.put(requestId, new RequestContext(ctx, request, retries, HttpUtil.isKeepAlive(request), System.currentTimeMillis(),isGray.equals("true")));
 
 
         //获取或创建连接池
@@ -168,6 +172,7 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             }
         });
     }
+
     // 处理连接获取失败
     private void handleAcquireFailure(ChannelHandlerContext ctx, FullHttpRequest request, int retries, Throwable cause) throws URISyntaxException {
         if (retries > 0) {
@@ -200,11 +205,13 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             errorHandler.sendErrorResponse(ctx, SERVICE_UNAVAILABLE);
         }
     }
+
     // 辅助方法：判断是否可重试错误
     private boolean isRetriableError(Throwable cause) {
         return cause instanceof ConnectException ||
                 cause instanceof TimeoutException;
     }
+
     // 辅助方法：计算退避时间
     private int calculateBackoffDelay(int retries) {
         int base = 1000; // 1秒基数

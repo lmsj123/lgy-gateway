@@ -72,7 +72,7 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
                     handleRetry(context.getFrontendCtx(), context.getOriginalRequest(), context.getRemainingRetries());
                 } else {
                     logger.info("响应成功 准备返回");
-                    forwardResponseToClient(context.getFrontendCtx(), backendResponse, backendCtx);// 正常响应转发
+                    forwardResponseToClient(context, backendResponse, backendCtx);// 正常响应转发
                 }
             } catch (URISyntaxException e) {
                 throw new RuntimeException(e);
@@ -127,7 +127,7 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
         }
     }
 
-    private void forwardResponseToClient(ChannelHandlerContext ctx, FullHttpResponse response, ChannelHandlerContext backendCtx) {
+    private void forwardResponseToClient(RequestContext context, FullHttpResponse response, ChannelHandlerContext backendCtx) {
         FullHttpResponse clientResponse = new DefaultFullHttpResponse(
                 HTTP_1_1,
                 response.status(),
@@ -143,6 +143,10 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
                 .set(HttpHeaderNames.ACCESS_CONTROL_MAX_AGE, "3600")
                 .set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8"); // 必须包含charset;
 
+        // BackendHandler 响应处理
+        boolean isGray = context.isGray();
+        ChannelHandlerContext ctx = context.getFrontendCtx();
+        clientResponse.headers().set("X-Gray-Hit", isGray ? "true" : "false");
         // 添加Keep-Alive头 保持长连接
         String requestId = backendCtx.channel().attr(REQUEST_ID_KEY).get();
         HttpUtil.setKeepAlive(clientResponse, requestContextMap.get(requestId).isKeepAlive());
@@ -164,11 +168,14 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
         // 发送响应并添加释放监听器
         ctx.writeAndFlush(clientResponse).addListener(future -> {
             if (!future.isSuccess()) {
-                ReferenceCountUtil.safeRelease(clientResponse.content());
+                if (clientResponse.content().refCnt() > 0) {
+                    ReferenceCountUtil.safeRelease(clientResponse.content());
+                }
             }
         });
         logger.info("正在返回响应");
     }
+
     // 复制请求并保留引用计数
     private FullHttpRequest copyAndRetainRequest(FullHttpRequest original) {
         try {

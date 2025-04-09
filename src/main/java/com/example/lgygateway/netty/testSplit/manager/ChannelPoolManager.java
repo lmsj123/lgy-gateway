@@ -1,5 +1,6 @@
 package com.example.lgygateway.netty.testSplit.manager;
 
+import com.example.lgygateway.config.ChannelPoolConfig;
 import com.example.lgygateway.netty.testSplit.handler.BackendHandler;
 import io.netty.channel.Channel;
 import io.netty.channel.pool.*;
@@ -21,12 +22,12 @@ public class ChannelPoolManager {
     private ApplicationContext applicationContext;
     @Autowired
     private ClientBootStrapManager clientBootStrapManager;
+    @Autowired
+    private ChannelPoolConfig channelPoolConfig;
     Logger logger = LoggerFactory.getLogger(ChannelPoolManager.class);
     // 初始化连接池
     @Getter
     private ChannelPoolMap<InetSocketAddress, FixedChannelPool> poolMap;
-    private static final int MAX_CONNECTIONS = 50;      // 每个后端地址最大连接数
-    private static final int ACQUIRE_TIMEOUT_MS = 5000; // 获取连接超时时间
     @PostConstruct
     public void init() {
         this.poolMap = new AbstractChannelPoolMap<>() {
@@ -38,14 +39,14 @@ public class ChannelPoolManager {
                         new CustomChannelPoolHandler(),
                         ChannelHealthChecker.ACTIVE, //使用默认健康检查
                         FixedChannelPool.AcquireTimeoutAction.FAIL,//获取超时后抛出异常
-                        5000,
-                        MAX_CONNECTIONS,
-                        ACQUIRE_TIMEOUT_MS
+                        channelPoolConfig.getAcquireTimeoutMillis(),
+                        channelPoolConfig.getMaxConnections(),
+                        channelPoolConfig.getMaxPendingRequests()
                 );
                 logger.info("正在预热连接");
                 // 异步预热10%连接
                 new Thread(() -> {
-                    int warmupConnections = (int) (MAX_CONNECTIONS * 0.1);
+                    int warmupConnections = (int) (channelPoolConfig.getMaxConnections() * 0.1);
                     for (int i = 0; i < warmupConnections; i++) {
                         pool.acquire().addListener(future -> {
                             if (future.isSuccess()) {
@@ -63,6 +64,7 @@ public class ChannelPoolManager {
             }
         };
     }
+
     // 自定义ChannelPoolHandler
     class CustomChannelPoolHandler extends AbstractChannelPoolHandler {
         @Override

@@ -42,7 +42,7 @@ public class RouteTableByTrie {
                 Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, path);
                 //根据定义的负载均衡策略选择一个服务作为转发ip
                 RouteValue routeValue = routeValues.get(path);
-                List<Instance> targetInstances = new ArrayList<>();
+                List<Instance> targetInstances;
                 boolean isGray = false;
                 if (routeValue.getGrayStrategy() != null) {
                     isGray = checkGrayMatch(request, routeValue.getGrayStrategy());
@@ -53,6 +53,8 @@ public class RouteTableByTrie {
                     }else {
                         Log.logger.info("获取到非灰度版本服务");
                     }
+                }else {
+                    targetInstances = routeRules.get(path + "-normal");
                 }
                 Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(targetInstances);
                 //示例： http://localhost/xxxx/api -> http://instance/api

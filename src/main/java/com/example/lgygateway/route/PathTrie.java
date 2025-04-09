@@ -71,6 +71,7 @@ public class PathTrie {
     // 新增通配符标识
 
     public void insert(String url, List<Instance> instances) {
+        url = url.split("-")[0];
         String[] parts = url.split("/");
         PathTrie pathTrie = this;
         for (int i = 1; i < parts.length; i++) {
@@ -80,7 +81,7 @@ public class PathTrie {
             }
             pathTrie = pathTrie.children.get(parts[i]);
         }
-        pathTrie.instances = new ArrayList<>(instances);
+        pathTrie.instances.addAll(instances);
         pathTrie.finalPath = url;
     }
     public List<Instance> search(String url) {

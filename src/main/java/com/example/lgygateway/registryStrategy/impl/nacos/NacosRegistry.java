@@ -170,7 +170,24 @@ public class NacosRegistry implements Registry, DisposableBean {
                             // 获取服务实例
                             List<Instance> allInstances = namingService.getAllInstances(serviceName);
                             if (!allInstances.isEmpty()) {
-                                rules.put(path, allInstances);
+                                // 分离灰度实例和正式实例
+                                List<Instance> normalInstances = allInstances.stream()
+                                        .filter(inst -> {
+                                            Map<String, String> metadata = inst.getMetadata();
+                                            return metadata == null || !"gray".equals(metadata.get("version"));
+                                        })
+                                        .collect(Collectors.toList());
+
+                                List<Instance> grayInstances = allInstances.stream()
+                                        .filter(inst -> {
+                                            Map<String, String> metadata = inst.getMetadata();
+                                            return metadata != null && "gray".equals(metadata.get("version"));
+                                        })
+                                        .collect(Collectors.toList());
+
+                                // 存入不同规则组
+                                rules.put(path + "-normal", normalInstances);
+                                rules.put(path + "-gray", grayInstances);
                             }
                             // 路由属性
                             RouteValue routeValue = new RouteValue();
@@ -188,6 +205,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                             routeValue.setFilterChain(filterChain);
                             routeValue.setMethod(route.getPredicates().getMethod());
                             routeValue.setLoadBalancerStrategy(loadBalancerStrategy);
+                            routeValue.setGrayStrategy(route.getGrayStrategy());
 
                             values.put(path, routeValue);
 
@@ -241,7 +259,8 @@ public class NacosRegistry implements Registry, DisposableBean {
             routeDataRef.getAndUpdate(current -> {
                 ConcurrentHashMap<String, List<Instance>> newRules = new ConcurrentHashMap<>(current.rules);
                 ConcurrentHashMap<String, RouteValue> newValues = new ConcurrentHashMap<>(current.values);
-                newRules.remove(path);
+                newRules.remove(path + "-normal");
+                newRules.remove(path + "-gray");
                 newValues.remove(path);
                 return new RouteData(newRules, newValues);
             });
@@ -355,6 +374,15 @@ public class NacosRegistry implements Registry, DisposableBean {
         public void onEvent(Event event) {
             try {
                 List<Instance> newInstances = namingService.selectInstances(serviceName, true);
+                // 分离灰度实例和正式实例
+                List<Instance> normalInstances = newInstances.stream()
+                        .filter(inst -> !"gray".equals(inst.getMetadata().get("version")))
+                        .toList();
+
+                List<Instance> grayInstances = newInstances.stream()
+                        .filter(inst -> "gray".equals(inst.getMetadata().get("version")))
+                        .toList();
+
                 Log.logger.info("更新新服务的路由");
                 // 遍历所有关联路径进行更新
                 boundPaths.keySet().forEach(path ->
@@ -362,10 +390,12 @@ public class NacosRegistry implements Registry, DisposableBean {
                             ConcurrentHashMap<String, List<Instance>> newRules = new ConcurrentHashMap<>(current.rules);
                             if (newInstances.isEmpty()) {
                                 Log.logger.info("正在删除 {} 服务", serviceName);
-                                newRules.remove(path);
+                                newRules.remove(path + "-normal");
+                                newRules.remove(path + "-gray");
                             } else {
                                 Log.logger.info("正在更新 {} 的 {} 服务",path, serviceName);
-                                newRules.put(path, newInstances);
+                                newRules.put(path + "-normal", normalInstances);
+                                newRules.put(path + "-gray", grayInstances);
                             }
                             return new RouteData(newRules, current.values);
                         })

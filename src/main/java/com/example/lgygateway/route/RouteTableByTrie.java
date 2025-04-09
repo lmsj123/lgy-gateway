@@ -3,20 +3,20 @@ package com.example.lgygateway.route;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.example.lgygateway.model.filter.FilterChain;
 import com.example.lgygateway.model.filter.FullContext;
+import com.example.lgygateway.model.route.routeConfig.GrayStrategy;
 import com.example.lgygateway.model.route.routeValue.RouteValue;
 import com.example.lgygateway.registryStrategy.factory.RegistryFactory;
 import com.example.lgygateway.utils.Log;
-import io.netty.handler.codec.http.DefaultFullHttpRequest;
-import io.netty.handler.codec.http.FullHttpRequest;
-import io.netty.handler.codec.http.HttpHeaderNames;
-import io.netty.handler.codec.http.HttpHeaderValues;
+import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.cookie.Cookie;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
 
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
@@ -42,7 +42,18 @@ public class RouteTableByTrie {
                 Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, path);
                 //根据定义的负载均衡策略选择一个服务作为转发ip
                 RouteValue routeValue = routeValues.get(path);
-                Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(trie.getInstances());
+                List<Instance> targetInstances = new ArrayList<>();
+                if (routeValue.getGrayStrategy() != null) {
+                    boolean isGray = checkGrayMatch(request, routeValue.getGrayStrategy());
+                    String pathSuffix = isGray ? "-gray" : "-normal";
+                    targetInstances = routeRules.get(path + pathSuffix);
+                    if(isGray){
+                        Log.logger.info("获取到灰度版本服务");
+                    }else {
+                        Log.logger.info("获取到非灰度版本服务");
+                    }
+                }
+                Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(targetInstances);
                 //示例： http://localhost/xxxx/api -> http://instance/api
                 //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
                 String targetUrl = buildTargetUrl(url, path, selectedInstance);
@@ -51,6 +62,46 @@ public class RouteTableByTrie {
             }
         }
         return null;
+    }
+
+    private static final String COOKIE = "Cookie";
+
+    public boolean checkGrayMatch(FullHttpRequest request, GrayStrategy grayStrategy) {
+        // 比例分流
+        if (grayStrategy.getRatio() != null) {
+            return ThreadLocalRandom.current().nextInt(100) < grayStrategy.getRatio();
+        }
+        // 参数匹配
+        String type = grayStrategy.getType().toUpperCase();
+        return switch (type) {
+            case "HEADER" -> grayStrategy.getValue().equals(request.headers().get(grayStrategy.getKey()));
+            case "COOKIE" -> isCookieMatch(request, grayStrategy);
+            case "PARAM" -> isParamMatch(request, grayStrategy);
+            default -> false;
+        };
+    }
+
+    private boolean isCookieMatch(FullHttpRequest request, GrayStrategy grayStrategy) {
+        String cookieHeader = request.headers().get(COOKIE);
+        if (cookieHeader == null) {
+            return false;
+        }
+
+        Set<Cookie> cookies = ServerCookieDecoder.STRICT.decode(cookieHeader);
+        Optional<Cookie> matchingCookie = cookies.stream()
+                .filter(c -> grayStrategy.getKey().equals(c.name()))
+                .findFirst();
+
+        return matchingCookie.map(c -> grayStrategy.getValue().equals(c.value())).orElse(false);
+    }
+
+    private boolean isParamMatch(FullHttpRequest request, GrayStrategy grayStrategy) {
+        QueryStringDecoder decoder = new QueryStringDecoder(request.uri());
+        List<String> values = decoder.parameters().get(grayStrategy.getKey());
+        if (values == null) {
+            return false;
+        }
+        return values.contains(grayStrategy.getValue());
     }
 
     private boolean successFiltering(FullHttpRequest request, String key, Map<String, RouteValue> routeValues) {

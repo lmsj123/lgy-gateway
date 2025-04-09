@@ -23,4 +23,7 @@ public class Route {
 
     @JsonProperty("LoadBalancer")
     private String loadBalancer;
+
+    @JsonProperty("gray")
+    private GrayStrategy grayStrategy; // 新增灰度策略字段
 }

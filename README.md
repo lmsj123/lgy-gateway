@@ -18,11 +18,10 @@
 
 1. 配置注册配置中心相关信息（此项目主要适用nacos举例）
 2. 配置好netty的相关信息（监听端口，重试次数，qps等）
-3. nacos中的路由规则一般为 -> /xxxx/ -> xxxxService
-4. 通过配置META-INF.services可以动态指定过滤器和负载均衡策略（SPI机制）
-5. 启动LgyGatewayApplication开启网关路由功能
-6. 后续优化可以从nacos作为配置中心入手 完成动态更新相关数据
-7. 配置文件举例如下： 
+3. 通过配置META-INF.services可以动态指定过滤器和负载均衡策略（SPI机制）
+4. 启动LgyGatewayApplication开启网关路由功能
+5. 后续优化可以从nacos作为配置中心入手 完成动态更新相关数据
+6. 配置文件举例如下： 
 [img.png](img.png)
 
 #### 参与贡献

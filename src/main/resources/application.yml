@@ -61,3 +61,4 @@ limit:
   service-token-refill-rate: 1000 # 服务令牌桶每秒填充速率
   window-size-sec: 1 # 窗口总时长（秒）
   slice-count: 20 # 窗口分片数量
+

@@ -17,6 +17,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
@@ -25,6 +26,8 @@ public class RouteTableByTrie {
 
     @Autowired
     private RegistryFactory registryFactory;
+    private final ReentrantLock lock = new ReentrantLock();
+    private PathTrie pathTrie;
 
     //遍历 ConcurrentHashMap 时若路由规则更新，可能读到中间状态。
     public FullHttpRequest matchRouteAsync(String url, FullHttpRequest request) throws URISyntaxException {
@@ -32,39 +35,42 @@ public class RouteTableByTrie {
         Map<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
         Map<String, RouteValue> routeValues = registryFactory.getRegistry().getRouteValues();
         // 初始化前缀树
-        PathTrie pathTrie = new PathTrie();
-        routeRules.forEach(pathTrie::insert);
-        String[] split = url.split("\\?");
-        PathTrie trie = pathTrie.searchPathTrie(split[0]);
-        if (!trie.getInstances().isEmpty()) {
-            String path = trie.getFinalPath();
-            if (successFiltering(request,path,routeValues)) {
-                Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, path);
-                //根据定义的负载均衡策略选择一个服务作为转发ip
-                RouteValue routeValue = routeValues.get(path);
-                List<Instance> targetInstances;
-                boolean isGray = false;
-                if (routeValue.getGrayStrategy() != null) {
-                    isGray = checkGrayMatch(request, routeValue.getGrayStrategy());
-                    String pathSuffix = isGray ? "-gray" : "-normal";
-                    targetInstances = routeRules.get(path + pathSuffix);
-                    if(isGray){
-                        Log.logger.info("获取到灰度版本服务");
+        try {
+            lock.lock();
+            String[] split = url.split("\\?");
+            PathTrie trie = pathTrie.searchPathTrie(split[0]);
+            if (!trie.getInstances().isEmpty()) {
+                String path = trie.getFinalPath();
+                if (successFiltering(request,path,routeValues)) {
+                    Log.logger.info("该路径 {} 存在对应的路由 {} 正在得到实例", url, path);
+                    //根据定义的负载均衡策略选择一个服务作为转发ip
+                    RouteValue routeValue = routeValues.get(path);
+                    List<Instance> targetInstances;
+                    boolean isGray = false;
+                    if (routeValue.getGrayStrategy() != null) {
+                        isGray = checkGrayMatch(request, routeValue.getGrayStrategy());
+                        String pathSuffix = isGray ? "-gray" : "-normal";
+                        targetInstances = routeRules.get(path + pathSuffix);
+                        if(isGray){
+                            Log.logger.info("获取到灰度版本服务");
+                        }else {
+                            Log.logger.info("获取到非灰度版本服务");
+                        }
                     }else {
-                        Log.logger.info("获取到非灰度版本服务");
+                        targetInstances = routeRules.get(path + "-normal");
                     }
-                }else {
-                    targetInstances = routeRules.get(path + "-normal");
+                    Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(targetInstances);
+                    //示例： http://localhost/xxxx/api -> http://instance/api
+                    //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
+                    String targetUrl = buildTargetUrl(url, path, selectedInstance);
+                    Log.logger.info("转发路径为 {}", targetUrl);
+                    return createProxyRequest(request, targetUrl,isGray);
                 }
-                Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(targetInstances);
-                //示例： http://localhost/xxxx/api -> http://instance/api
-                //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突
-                String targetUrl = buildTargetUrl(url, path, selectedInstance);
-                Log.logger.info("转发路径为 {}", targetUrl);
-                return createProxyRequest(request, targetUrl,isGray);
             }
+            return null;
+        }finally {
+            lock.unlock();
         }
-        return null;
     }
 
     private static final String COOKIE = "Cookie";
@@ -157,6 +163,18 @@ public class RouteTableByTrie {
         }
         return "http://" + instance.getIp() + ":" + instance.getPort()
                 + backendPath + (query.isEmpty() ? "" : "?" + query);
+    }
+
+    public void updatePathTrie(){
+        try {
+            lock.lock();
+            Map<String, List<Instance>> routeRules = registryFactory.getRegistry().getRouteRules();
+            // 初始化前缀树
+            pathTrie = new PathTrie();
+            routeRules.forEach(pathTrie::insert);
+        }finally {
+            lock.unlock();
+        }
     }
 }
 

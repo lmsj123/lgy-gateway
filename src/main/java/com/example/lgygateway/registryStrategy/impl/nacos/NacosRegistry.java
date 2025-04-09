@@ -18,6 +18,7 @@ import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.model.route.routeConfig.Filters;
 import com.example.lgygateway.model.route.routeConfig.Route;
 import com.example.lgygateway.model.route.routeValue.RouteValue;
+import com.example.lgygateway.route.RouteTableByTrie;
 import com.example.lgygateway.utils.Log;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,6 +26,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.yaml.snakeyaml.Yaml;
@@ -56,6 +58,8 @@ public class NacosRegistry implements Registry, DisposableBean {
     public Map<String, RouteValue> getRouteValues() {
         return Collections.unmodifiableMap(routeDataRef.get().values);
     }
+    @Autowired
+    private ApplicationContext applicationContext;
 
     @Autowired
     private NacosConfig nacosConfig;
@@ -242,6 +246,7 @@ public class NacosRegistry implements Registry, DisposableBean {
 
                 return new RouteData(mergedRules, mergedValues);
             });
+            applicationContext.getBean(RouteTableByTrie.class).updatePathTrie();
         } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {
@@ -264,7 +269,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                 newValues.remove(path);
                 return new RouteData(newRules, newValues);
             });
-
+            applicationContext.getBean(RouteTableByTrie.class).updatePathTrie();
             // 清理订阅关系 可能存在不同路径指向同一个服务 所以要判断服务数量
             try {
                 cleanupSubscription(removedRoute);
@@ -406,6 +411,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                             return new RouteData(newRules, current.values);
                         })
                 );
+                applicationContext.getBean(RouteTableByTrie.class).updatePathTrie();
             } catch (NacosException e) {
                 // 异常处理...
             }

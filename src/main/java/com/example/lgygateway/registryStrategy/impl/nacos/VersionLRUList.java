@@ -1,28 +1,18 @@
 package com.example.lgygateway.registryStrategy.impl.nacos;
 
-import com.example.lgygateway.registryStrategy.impl.nacos.NacosRegistry.RouteData;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 @SuppressWarnings("all")
 public class VersionLRUList {
-    public static void main(String[] args) {
-        VersionLRUList cache = new VersionLRUList(2);
-        cache.add(1.0, new RouteData(new ConcurrentHashMap<>(), new ConcurrentHashMap<>()));
-        cache.add(2.0, new RouteData(new ConcurrentHashMap<>(), new ConcurrentHashMap<>()));
-        cache.get(1.0);
-        cache.add(3.0, new RouteData(new ConcurrentHashMap<>(), new ConcurrentHashMap<>()));  // 容量超限，应删除1.0
-        System.out.println(cache.get(2.0));
-        System.out.println(cache.get(1.0));
-    }
     private class Node{
         double version;
-        RouteData routeData;
+        String content;
         Node next;
         Node prev;
         public Node(){}
-        public Node(double version,RouteData routeData){
-            this.routeData = routeData;
+        public Node(double version,String content){
+            this.content = content;
             this.version = version;
         }
     }
@@ -64,16 +54,16 @@ public class VersionLRUList {
     private final ConcurrentHashMap<Double,Node> map = new ConcurrentHashMap<>();
     private final ReentrantLock lock = new ReentrantLock();
     private final LRUList lruList = new LRUList();
-    public void add(double version, RouteData routeData){
+    public void add(double version, String content){
         try {
             lock.lock();
             if (map.containsKey(version)){
                 Node cur = map.get(version);
-                cur.routeData = routeData;
+                cur.content = content;
                 lruList.remove(cur);
                 lruList.addFirst(cur);
             }else {
-                Node node = new Node(version, routeData);
+                Node node = new Node(version, content);
                 map.put(version, node);
                 lruList.addFirst(node);
                 if (map.size() > size){
@@ -86,14 +76,14 @@ public class VersionLRUList {
         }
 
     }
-    public RouteData get(double version){
+    public String get(double version){
         try {
             lock.lock();
             if (map.containsKey(version)){
                 Node node = map.get(version);
                 lruList.remove(node);
                 lruList.addFirst(node);
-                return node.routeData;
+                return node.content;
             }else {
                 return null;
             }

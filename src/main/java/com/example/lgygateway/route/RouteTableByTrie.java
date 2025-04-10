@@ -59,6 +59,9 @@ public class RouteTableByTrie {
                     }else {
                         targetInstances = routeRules.get(path + "-normal");
                     }
+                    if (targetInstances.isEmpty()) {
+                        return null;
+                    }
                     Instance selectedInstance = routeValue.getLoadBalancerStrategy().selectInstance(targetInstances);
                     //示例： http://localhost/xxxx/api -> http://instance/api
                     //获取路由规则 一般定义为 /xxxx/ -> xxxxServer 避免存在 /xxx 和 /xxxy产生冲突

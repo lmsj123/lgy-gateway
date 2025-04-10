@@ -37,4 +37,14 @@ public class ZookeeperRegistry implements Registry {
     public ConcurrentHashMap<String, RouteValue> getRouteValues() {
         return null;
     }
+
+    @Override
+    public String rollbackVersionConfig(double version) {
+        return null;
+    }
+
+    @Override
+    public String clearCache() {
+        return null;
+    }
 }

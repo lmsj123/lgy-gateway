@@ -14,13 +14,16 @@ import com.example.lgygateway.filters.SPIFactory.SPIFilterFactory;
 import com.example.lgygateway.model.filter.FilterChain;
 import com.example.lgygateway.loadStrategy.LoadBalancerStrategy;
 import com.example.lgygateway.loadStrategy.SPIFactory.SPILoadStrategyFactory;
+import com.example.lgygateway.model.route.routeConfig.RouteConfig;
 import com.example.lgygateway.registryStrategy.Registry;
 import com.example.lgygateway.model.route.routeConfig.Filters;
 import com.example.lgygateway.model.route.routeConfig.Route;
 import com.example.lgygateway.model.route.routeValue.RouteValue;
 import com.example.lgygateway.route.RouteTableByTrie;
 import com.example.lgygateway.utils.Log;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import jakarta.annotation.PostConstruct;
@@ -29,7 +32,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
-import org.yaml.snakeyaml.Yaml;
 
 import java.lang.ref.SoftReference;
 import java.util.*;
@@ -37,6 +39,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
+
 //TODO 1) SPI相关的缓存策略 现在策略是每次配置文件更新时都会通过SPI机制加载相对应的实例 后续可以通过本地缓存或者Redis进行优化判断（完成简单缓存）
 //     2) 对对应的路由规则添加版本号，后续可支持灰度发布和回滚
 @Component("nacos")
@@ -44,7 +47,8 @@ import java.util.stream.Collectors;
 public class NacosRegistry implements Registry, DisposableBean {
     //rules: path -> instances
     //values: path -> RouteValue
-    record RouteData(ConcurrentHashMap<String, List<Instance>> rules, ConcurrentHashMap<String, RouteValue> values) {}
+    record RouteData(ConcurrentHashMap<String, List<Instance>> rules, ConcurrentHashMap<String, RouteValue> values) {
+    }
 
     // 存储路由
     // 使用原子引用+副本策略保证路由更新原子性
@@ -52,16 +56,28 @@ public class NacosRegistry implements Registry, DisposableBean {
             new AtomicReference<>(new RouteData(new ConcurrentHashMap<>(), new ConcurrentHashMap<>()));
 
     public Map<String, List<Instance>> getRouteRules() {
-        return Collections.unmodifiableMap(routeDataRef.get().rules);
+        try {
+            lock.lock();
+            return Collections.unmodifiableMap(routeDataRef.get().rules);
+        } finally {
+            lock.unlock();
+        }
     }
 
     public Map<String, RouteValue> getRouteValues() {
-        return Collections.unmodifiableMap(routeDataRef.get().values);
+        try {
+            lock.lock();
+            return Collections.unmodifiableMap(routeDataRef.get().values);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Autowired
     private ApplicationContext applicationContext;
 
+    // 配置文件的lru版本链 方便后续回滚 初衷是为了能够避免当新配置文件存在错误时能够及时回滚 而不是依然需要修改配置文件
+    private final VersionLRUList versionLRUList = new VersionLRUList(5);
     @Autowired
     private NacosConfig nacosConfig;
     // 已订阅的服务名集合（防止重复订阅）serviceName -> listener
@@ -139,7 +155,8 @@ public class NacosRegistry implements Registry, DisposableBean {
             lock.lock();
             ConcurrentHashMap<String, List<Instance>> rules = new ConcurrentHashMap<>();
             ConcurrentHashMap<String, RouteValue> values = new ConcurrentHashMap<>();
-            List<Route> routes = analysisYaml(content);
+            RouteConfig routeConfig = analysisYaml(content);
+            List<Route> routes = routeConfig.getRoutes();
             Log.logger.info("正在获取解析的routes");
             // 构建新旧路由标识映射
             Set<String> newRouteIds = routes.stream().parallel()
@@ -248,6 +265,8 @@ public class NacosRegistry implements Registry, DisposableBean {
                 return new RouteData(mergedRules, mergedValues);
             });
             applicationContext.getBean(RouteTableByTrie.class).updatePathTrie();
+            // 将配置文件加入版本链中
+            versionLRUList.add(routeConfig.getVersion(), content);
         } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {
@@ -306,6 +325,7 @@ public class NacosRegistry implements Registry, DisposableBean {
     //预先加载所有 LoadServer 实现
     private static volatile SoftReference<List<SPILoadStrategyFactory>> loadCacheRef;
     private static final ScheduledExecutorService loadScheduler = Executors.newSingleThreadScheduledExecutor();
+
     private static List<SPILoadStrategyFactory> loadAllLoadBalancers() {
         List<SPILoadStrategyFactory> list = loadCacheRef != null ? loadCacheRef.get() : null;
         if (list == null) {
@@ -321,6 +341,7 @@ public class NacosRegistry implements Registry, DisposableBean {
         }
         return list;
     }
+
     private LoadBalancerStrategy getMatchedLoadBalancer(String loadBalancer) {
         List<SPILoadStrategyFactory> list = loadAllLoadBalancers().stream()
                 .filter(loadBalancerStrategy
@@ -335,10 +356,12 @@ public class NacosRegistry implements Registry, DisposableBean {
     // 这里使用的是缓存加定时更新这样的方案 适用于对于实时性不高 后续可实现一个接口清空缓存便可以重新加载
     private static volatile SoftReference<List<SPIFilterFactory>> filterCacheRef;
     private static final ScheduledExecutorService filterScheduler = Executors.newSingleThreadScheduledExecutor();
+
     static {
         filterScheduler.scheduleAtFixedRate(() -> filterCacheRef = null, 1, 1, TimeUnit.HOURS); // 每小时刷新
         loadScheduler.scheduleAtFixedRate(() -> loadCacheRef = null, 1, 1, TimeUnit.HOURS);
     }
+
     private static List<SPIFilterFactory> loadAllFilters() {
         List<SPIFilterFactory> list = filterCacheRef != null ? filterCacheRef.get() : null;
         if (list == null) {
@@ -354,6 +377,7 @@ public class NacosRegistry implements Registry, DisposableBean {
         }
         return list;
     }
+
     private FilterChain getMatchedFilters(List<String> filterNames) {
         List<SPIFilterFactory> filterFactories = loadAllFilters().stream()
                 .filter(filter -> filterNames.contains(filter.getType()))
@@ -375,10 +399,12 @@ public class NacosRegistry implements Registry, DisposableBean {
         public void addPath(String path) {
             boundPaths.put(path, true);
         }
+
         // 只能改与服务名相关的属性
         @Override
         public void onEvent(Event event) {
             try {
+                lock.lock();
                 List<Instance> newInstances = namingService.selectInstances(serviceName, true);
                 // 分离灰度实例和正式实例
                 List<Instance> normalInstances = newInstances.stream()
@@ -405,7 +431,7 @@ public class NacosRegistry implements Registry, DisposableBean {
                                 newRules.remove(path + "-normal");
                                 newRules.remove(path + "-gray");
                             } else {
-                                Log.logger.info("正在更新 {} 的 {} 服务",path, serviceName);
+                                Log.logger.info("正在更新 {} 的 {} 服务", path, serviceName);
                                 newRules.put(path + "-normal", normalInstances);
                                 newRules.put(path + "-gray", grayInstances);
                             }
@@ -415,6 +441,8 @@ public class NacosRegistry implements Registry, DisposableBean {
                 applicationContext.getBean(RouteTableByTrie.class).updatePathTrie();
             } catch (NacosException e) {
                 // 异常处理...
+            } finally {
+                lock.unlock();
             }
         }
 
@@ -431,15 +459,15 @@ public class NacosRegistry implements Registry, DisposableBean {
     }
 
     // 解析yaml配置文件
-    public List<Route> analysisYaml(String content) {
+    public RouteConfig analysisYaml(String content) throws JsonProcessingException {
         // 使用SnakeYAML解析原始YAML内容
-        ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
-        // 直接解析整个 YAML 结构到 Map，提取 routes 列表
-        Yaml yaml = new Yaml();
-        Map<String, Object> root = yaml.load(content);
-        List<Map<String, Object>> routesList = (List<Map<String, Object>>) root.get("routes");
-        // 将 List<Map> 转换为 List<Route>
-        return yamlMapper.convertValue(routesList, new TypeReference<>() {
+        ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory())
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        // 直接映射到包装类
+        Map<String, Object> root = yamlMapper.readValue(content, new TypeReference<>() {
+        });
+        Object route = root.get("route-config");
+        return yamlMapper.convertValue(route, new TypeReference<>() {
         });
     }
 
@@ -478,7 +506,8 @@ public class NacosRegistry implements Registry, DisposableBean {
     }
 
     // 清空缓存（手动触发）
-    public static void clearCache() {
+    @Override
+    public String clearCache() {
         if (loadCacheRef != null) {
             loadCacheRef.clear();  // 清空软引用
             loadCacheRef = null;   // 可选：彻底释放
@@ -486,6 +515,20 @@ public class NacosRegistry implements Registry, DisposableBean {
         if (filterCacheRef != null) {
             filterCacheRef.clear();
             filterCacheRef = null;
+        }
+        return "清除成功";
+    }
+
+    // 回滚版本链
+    @Override
+    public String rollbackVersionConfig(double version) {
+        if (versionLRUList.get(version) != null) {
+            Log.logger.info("正在回滚对应的版本 {}", version);
+            String content = versionLRUList.get(version);
+            parseAndUpdateRouteRules(content);
+            return "回滚成功";
+        } else {
+            return "不存在对应的版本";
         }
     }
 }

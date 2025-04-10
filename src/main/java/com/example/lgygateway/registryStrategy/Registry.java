@@ -11,4 +11,8 @@ public interface Registry {
     Map<String, List<Instance>> getRouteRules();
     //得到对应的路由属性
     Map<String, RouteValue> getRouteValues();
+    //回滚版本链
+    String rollbackVersionConfig(double version);
+    //清理缓存
+    String clearCache();
 }

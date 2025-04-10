@@ -58,6 +58,7 @@ public class NacosRegistry implements Registry, DisposableBean {
     public Map<String, RouteValue> getRouteValues() {
         return Collections.unmodifiableMap(routeDataRef.get().values);
     }
+
     @Autowired
     private ApplicationContext applicationContext;
 

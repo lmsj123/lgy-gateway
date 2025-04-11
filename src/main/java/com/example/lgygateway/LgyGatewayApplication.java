@@ -8,7 +8,7 @@ import org.springframework.context.ConfigurableApplicationContext;
 public class LgyGatewayApplication {
 
     public static void main(String[] args) {
-        ConfigurableApplicationContext run = SpringApplication.run(LgyGatewayApplication.class, args);
+        SpringApplication.run(LgyGatewayApplication.class, args);
     }
 
 }

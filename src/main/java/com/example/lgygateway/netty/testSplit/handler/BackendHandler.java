@@ -6,7 +6,6 @@ import com.example.lgygateway.netty.testSplit.manager.CircuitBreakerManager;
 import com.example.lgygateway.netty.testSplit.manager.LimitManager;
 import com.example.lgygateway.netty.testSplit.manager.RequestContextMapManager;
 import com.example.lgygateway.netty.testSplit.model.RequestContext;
-import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.channel.pool.*;
@@ -179,28 +178,12 @@ public class BackendHandler extends SimpleChannelInboundHandler<FullHttpResponse
 
     // 复制请求并保留引用计数
     private FullHttpRequest copyAndRetainRequest(FullHttpRequest original) {
-        ByteBuf contentCopy = null;
         try {
-            // 尝试拷贝内容
-            contentCopy = Unpooled.buffer(0);                          // 创建空缓冲区
-
-            // 构建请求副本（保留元数据）
-            DefaultFullHttpRequest copy = new DefaultFullHttpRequest(
-                    original.protocolVersion(),
-                    original.method(),
-                    original.uri(),
-                    contentCopy,
-                    original.headers().copy(),          // 头信息可独立拷贝
-                    original.trailingHeaders().copy()   // 尾部头同样安全
-            );
-            copy.setDecoderResult(original.decoderResult());
-
+            FullHttpRequest copy = original.copy(); // 创建副本
+            copy.retain(); // 增加引用计数
             return copy;
-
         } catch (Exception e) {
-            // 异常时清理资源
-            if (contentCopy != null) contentCopy.release();
-            logger.error("复制失败", e);
+            logger.error("复制请求失败", e);
             return null;
         }
     }

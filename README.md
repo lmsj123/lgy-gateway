@@ -7,17 +7,12 @@
 一、核心架构设计
 模块划分
 网络层：基于Netty实现异步非阻塞IO，使用ServerBootstrap和Bootstrap分别处理服务端和客户端连接。
-
 限流体系：
 滑动窗口计数器（全局限流）
 令牌桶（服务级、用户级、游客级限流）
-
 路由匹配：通过RouteTable动态匹配后端服务地址。
-
 连接池管理：基于FixedChannelPool实现长连接复用。
-
 重试机制：指数退避+随机抖动，避免重试风暴。
-
 上下文管理：requestContextMap缓存请求元数据，支持异步链路追踪。
 #### 使用说明
 
@@ -26,7 +21,8 @@
 3. 通过配置META-INF.services可以动态指定过滤器和负载均衡策略（SPI机制）
 4. 启动LgyGatewayApplication开启网关路由功能
 5. 后续优化可以从nacos作为配置中心入手 完成动态更新相关数据
-6. 配置文件在yml中可进行相关修改
+6. 配置文件举例如下： 
+[img.png](img.png)
 
 #### 参与贡献
 

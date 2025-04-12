@@ -21,8 +21,7 @@
 3. 通过配置META-INF.services可以动态指定过滤器和负载均衡策略（SPI机制）
 4. 启动LgyGatewayApplication开启网关路由功能
 5. 后续优化可以从nacos作为配置中心入手 完成动态更新相关数据
-6. 配置文件举例如下： 
-[img.png](img.png)
+6. 配置文件在yml文件中
 
 #### 参与贡献
 

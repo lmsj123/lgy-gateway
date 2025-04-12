@@ -63,3 +63,54 @@ limit:
   slice-count: 20 # 窗口分片数量
 
 
+
+#此为对应的配置文件信息
+#route-config:
+#  version: 1.1
+#  routes:
+#    # 系统管理路由
+#    - id: 7
+#      uri: lb://xxxxService
+#      LoadBalancer: RoundRobinLoadBalancer
+#      predicates:
+#        Path: /xxxx/*
+#        Method: ALL
+#      filters:
+#        - name: AuthFilter
+#        - name: RateLimitFilter
+#      gray:
+#        type: HEADER   # 支持 HEADER/COOKIE/PARAM
+#        key: X-Gray    # 匹配的键
+#        value: true  # 匹配的值
+#        ratio: 10     # 流量比例（可选）
+#    - id: 2
+#      uri: lb://yyyyService
+#      LoadBalancer: RoundRobinLoadBalancer
+#      predicates:
+#        Path: /yyyy/**
+#        Method: ALL
+#      filters:
+#        - name: RateLimitFilter
+#      gray:
+#        type: HEADER   # 支持 HEADER/COOKIE/PARAM
+#        key: X-Gray    # 匹配的键
+#        value: true  # 匹配的值
+#        ratio: 10     # 流量比例（可选）
+#    - id: 3
+#      uri: lb://pythonService
+#      LoadBalancer: RoundRobinLoadBalancer
+#      predicates:
+#        Path: /python/**
+#        Method: ALL
+#      filters:
+#        - name: AuthFilter
+#    - id: 4
+#      uri: lb://xxxxService
+#      LoadBalancer: RoundRobinLoadBalancer
+#      predicates:
+#        Path: /xxxx/**
+#        Method: ALL
+#      filters:
+#        - name: AuthFilter
+#        - name: RateLimitFilter
+
